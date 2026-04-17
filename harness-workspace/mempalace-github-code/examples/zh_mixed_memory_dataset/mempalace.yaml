@@ -1,0 +1,22 @@
+wing: zh_mixed_memory_dataset
+rooms:
+  - name: architecture
+    description: Architecture and design docs
+    keywords: [architecture, design, queue, index, outbox, schema, api]
+  - name: auth
+    description: Authentication and session docs
+    keywords: [auth, token, refresh, session, revoke]
+  - name: incidents
+    description: Incident and postmortem docs
+    keywords: [incident, postmortem, rollback, duplicate, root-cause]
+  - name: search
+    description: Search and ranking docs
+    keywords: [search, ranking, lexical, vector, bm25]
+  - name: operations
+    description: Runbooks and operations docs
+    keywords: [runbook, retry, dlq, monitor, alert]
+  - name: data
+    description: Data and migration docs
+    keywords: [migration, postgres, mysql, retention, audit]
+  - name: general
+    description: General docs

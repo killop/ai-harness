@@ -1,0 +1,22 @@
+wing: game_client
+rooms:
+  - name: combat
+    keywords: [combat, battle, boss, skill, buff, damage, 战斗, 技能, 世界boss]
+  - name: world
+    keywords: [world, city, march, relocate, map, territory, 行军, 迁城, 世界地图]
+  - name: alliance
+    keywords: [alliance, rally, guild, legion, 集结, 联盟]
+  - name: activity
+    keywords: [activity, event, turntable, recharge, strongest, 活动, 转盘, 充值]
+  - name: economy
+    keywords: [economy, shop, reward, currency, monetization, 经济, 商店, 奖励]
+  - name: social
+    keywords: [social, chat, friend, mail, 社交, 聊天, 邮件]
+  - name: ui
+    keywords: [ui, interaction, window, panel, 界面, 交互]
+  - name: architecture
+    keywords: [architecture, design, spec, adr, protocol, module, 架构, 设计, 协议]
+  - name: tools
+    keywords: [tool, workflow, automation, pipeline, skill, 工具, 流程, 自动化]
+  - name: build
+    keywords: [build, ci, release, package, jenkins, 打包, 发布]
