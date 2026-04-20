@@ -35,6 +35,12 @@ if (-not (Test-Path -LiteralPath $MempalaceRepo)) {
     throw "MemPalace repo not found: $MempalaceRepo"
 }
 
+$pythonExe = Join-Path $MempalaceRepo ".venv\Scripts\python.exe"
+if (-not (Test-Path -LiteralPath $pythonExe)) {
+    $setupScript = Join-Path $PSScriptRoot "Setup-MemPalace.ps1"
+    throw "MemPalace venv not found: $pythonExe`nRun: powershell -ExecutionPolicy Bypass -File `"$setupScript`""
+}
+
 if (-not $SkipSync) {
     & (Join-Path $PSScriptRoot "Sync-MemoryCache.ps1") `
         -WorkspaceRoot $WorkspaceRoot `
@@ -48,18 +54,11 @@ $wingDirs = Get-ChildItem -LiteralPath $KnowledgeCacheRoot -Directory | Where-Ob
     Test-Path -LiteralPath (Join-Path $_.FullName "mempalace.yaml")
 }
 
-$previousPythonPath = $env:PYTHONPATH
 try {
-    if ([string]::IsNullOrWhiteSpace($previousPythonPath)) {
-        $env:PYTHONPATH = $MempalaceRepo
-    } else {
-        $env:PYTHONPATH = "$MempalaceRepo;$previousPythonPath"
-    }
-
     Push-Location $MempalaceRepo
     foreach ($wingDir in $wingDirs) {
         Write-Host ("Mining {0} -> {1}" -f $wingDir.FullName, $PalacePath)
-        & python -m mempalace.cli --palace $PalacePath mine $wingDir.FullName
+        & $pythonExe -m mempalace.cli --palace $PalacePath mine $wingDir.FullName
         if ($LASTEXITCODE -ne 0) {
             throw "MemPalace mine failed for $($wingDir.FullName)"
         }
@@ -67,7 +66,6 @@ try {
 }
 finally {
     Pop-Location
-    $env:PYTHONPATH = $previousPythonPath
 }
 
 Write-Host "MemPalace refresh complete."

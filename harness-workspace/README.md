@@ -37,6 +37,8 @@ source docs
   - MemPalace 源码和命令行入口所在目录。
 - `tools/`
   - `sync-map.json` 定义同步映射。
+  - `Start-MemPalace-Mcp.cmd` 用专用 `.venv` 启动 MCP。
+  - `Setup-MemPalace.ps1` 创建专用 `.venv` 并安装依赖。
   - `Sync-MemoryCache.ps1` 把源文档整理到 `knowledges-cache/`。
   - `Refresh-MemPalace.ps1` 挖掘各 wing 并刷新 palace。
   - `Rebuild-MemPalace.ps1` 删除旧 palace 后全量重建。
@@ -44,6 +46,12 @@ source docs
 ## 常用命令
 
 在 `harness-workspace/` 目录下执行：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\tools\Setup-MemPalace.ps1
+```
+
+首次使用或更换 Python 环境时，先执行一次上面的初始化命令。它会在 `mempalace-github-code/.venv` 下创建专用虚拟环境，并安装 MemPalace 依赖。
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\tools\Sync-MemoryCache.ps1
@@ -56,6 +64,8 @@ powershell -ExecutionPolicy Bypass -File .\tools\Refresh-MemPalace.ps1
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\tools\Rebuild-MemPalace.ps1
 ```
+
+如果需要给本地 MCP 配置启动命令，优先指向受版本控制的 `.\harness-workspace\tools\Start-MemPalace-Mcp.cmd`，不要把启动逻辑只放在各自未提交的 `.codex\` 目录里。
 
 ## 维护约定
 
