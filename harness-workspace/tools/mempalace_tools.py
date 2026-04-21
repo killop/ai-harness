@@ -108,6 +108,10 @@ def default_workspace_root() -> Path:
     return script_dir().parent
 
 
+def default_agent_root() -> Path:
+    return default_workspace_root().parent
+
+
 def default_repo_root() -> Path:
     return default_workspace_root() / "mempalace-github-code"
 
@@ -118,6 +122,10 @@ def default_knowledge_cache_root() -> Path:
 
 def default_palace_path() -> Path:
     return default_workspace_root() / ".mempalace_local" / "palace"
+
+
+def default_codex_config_path() -> Path:
+    return default_agent_root() / ".codex" / "config.toml"
 
 
 CURRENT_POINTER_FILENAME = "current.json"
@@ -453,6 +461,130 @@ def resolve_venv_python(mempalace_repo: Path) -> Path:
         if candidate.exists():
             return candidate.resolve()
     raise FileNotFoundError(f"MemPalace venv python not found under {mempalace_repo / '.venv'}")
+
+
+def preferred_venv_python_path(mempalace_repo: Path) -> Path:
+    if os.name == "nt":
+        return mempalace_repo / ".venv" / "Scripts" / "python.exe"
+    return mempalace_repo / ".venv" / "bin" / "python3"
+
+
+def format_tool_command(python_exe: Path, *tool_args: str) -> str:
+    command = [f'"{python_exe}"', f'"{script_dir() / "mempalace_tools.py"}"']
+    command.extend(tool_args)
+    return " ".join(command)
+
+
+def render_agent_relative_path(path: Path, agent_root: Path) -> str:
+    resolved_path = path.expanduser().resolve()
+    resolved_root = agent_root.expanduser().resolve()
+    try:
+        relative_path = resolved_path.relative_to(resolved_root)
+    except ValueError:
+        return str(resolved_path)
+
+    if os.name == "nt":
+        return ".\\" + str(relative_path).replace("/", "\\")
+    return "./" + relative_path.as_posix()
+
+
+def toml_string(value: str) -> str:
+    return json.dumps(value, ensure_ascii=False)
+
+
+def toml_array(values: Sequence[str]) -> str:
+    return "[" + ", ".join(toml_string(value) for value in values) + "]"
+
+
+def detect_newline(text: str) -> str:
+    if "\r\n" in text:
+        return "\r\n"
+    return "\n"
+
+
+def find_toml_section_bounds(lines: Sequence[str], section_name: str) -> tuple[int, int] | None:
+    header = f"[{section_name}]"
+    start_index: int | None = None
+    for index, line in enumerate(lines):
+        if line.strip() == header:
+            start_index = index
+            break
+
+    if start_index is None:
+        return None
+
+    end_index = len(lines)
+    for index in range(start_index + 1, len(lines)):
+        stripped = lines[index].strip()
+        if stripped.startswith("[") and stripped.endswith("]"):
+            end_index = index
+            break
+    return start_index, end_index
+
+
+def upsert_toml_key(section_lines: list[str], key: str, rendered_value: str) -> list[str]:
+    pattern = re.compile(rf"^\s*{re.escape(key)}\s*=")
+    replacement = f"{key} = {rendered_value}"
+
+    for index, line in enumerate(section_lines):
+        if pattern.match(line):
+            section_lines[index] = replacement
+            return section_lines
+
+    insert_at = len(section_lines)
+    while insert_at > 0 and not section_lines[insert_at - 1].strip():
+        insert_at -= 1
+    section_lines.insert(insert_at, replacement)
+    return section_lines
+
+
+def upsert_toml_section_values(
+    lines: list[str],
+    section_name: str,
+    assignments: Sequence[tuple[str, str]],
+) -> list[str]:
+    bounds = find_toml_section_bounds(lines, section_name)
+    if bounds is None:
+        while lines and not lines[-1].strip():
+            lines.pop()
+        if lines:
+            lines.append("")
+        lines.append(f"[{section_name}]")
+        for key, rendered_value in assignments:
+            lines.append(f"{key} = {rendered_value}")
+        return lines
+
+    start_index, end_index = bounds
+    section_lines = list(lines[start_index + 1:end_index])
+    for key, rendered_value in assignments:
+        section_lines = upsert_toml_key(section_lines, key, rendered_value)
+    return lines[:start_index + 1] + section_lines + lines[end_index:]
+
+
+def build_codex_mcp_sections(
+    agent_root: Path,
+    mempalace_repo: Path,
+    server_name: str,
+) -> list[tuple[str, list[tuple[str, str]]]]:
+    python_path = render_agent_relative_path(preferred_venv_python_path(mempalace_repo), agent_root)
+    tool_path = render_agent_relative_path(script_dir() / "mempalace_tools.py", agent_root)
+    return [
+        (
+            f"mcp_servers.{server_name}",
+            [
+                ("command", toml_string(python_path)),
+                ("args", toml_array([tool_path, "start-mcp"])),
+            ],
+        ),
+        (
+            f"mcp_servers.{server_name}.tools.mempalace_status",
+            [("approval_mode", toml_string("approve"))],
+        ),
+        (
+            f"mcp_servers.{server_name}.tools.mempalace_list_wings",
+            [("approval_mode", toml_string("approve"))],
+        ),
+    ]
 
 
 def run_command(command: Sequence[str], *, cwd: Path | None = None) -> None:
@@ -961,6 +1093,10 @@ def run_setup(args: argparse.Namespace) -> int:
     print("MemPalace setup complete.")
     print(f"Repo: {mempalace_repo}")
     print(f"Venv: {venv_path}")
+    print(f"Preferred runner after setup: {venv_python}")
+    print(f"Refresh with: {format_tool_command(venv_python, 'refresh')}")
+    print(f"Start MCP with: {format_tool_command(venv_python, 'start-mcp')}")
+    print(f"Install local Codex MCP with: {format_tool_command(venv_python, 'install-agent-mcp')}")
     return 0
 
 
@@ -1002,8 +1138,12 @@ def run_start_mcp(args: argparse.Namespace) -> int:
         python_exe = resolve_venv_python(mempalace_repo)
     except FileNotFoundError as exc:
         setup_hint = script_dir() / "mempalace_tools.py"
+        bootstrap_python = "python" if os.name == "nt" else "python3"
+        preferred_runner = preferred_venv_python_path(mempalace_repo)
         raise RuntimeError(
-            f"MemPalace venv not found under {mempalace_repo / '.venv'}\nRun setup first. Example: python \"{setup_hint}\" setup"
+            f"MemPalace venv not found under {mempalace_repo / '.venv'}\n"
+            f"Bootstrap once with your system Python: {bootstrap_python} \"{setup_hint}\" setup\n"
+            f"Then use the repo-local venv runner: {format_tool_command(preferred_runner, 'start-mcp')}"
         ) from exc
 
     palace_path.mkdir(parents=True, exist_ok=True)
@@ -1012,6 +1152,54 @@ def run_start_mcp(args: argparse.Namespace) -> int:
         cwd=str(mempalace_repo),
     )
     return result.returncode
+
+
+def run_install_agent_mcp(args: argparse.Namespace) -> int:
+    if args.agent != "codex":
+        raise RuntimeError(f"Unsupported agent target: {args.agent}")
+
+    agent_root = Path(args.agent_root).expanduser().resolve()
+    workspace_root = Path(args.workspace_root).expanduser().resolve()
+    mempalace_repo = Path(args.mempalace_repo).expanduser().resolve()
+    config_path = Path(args.codex_config_path).expanduser().resolve()
+
+    ensure_required_path(agent_root, "Agent root")
+    ensure_required_path(workspace_root, "Workspace root")
+    ensure_required_path(mempalace_repo, "MemPalace repo")
+
+    if not path_within(agent_root, workspace_root):
+        raise RuntimeError(f"Workspace root must stay within agent root: {workspace_root}")
+
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    existing_text = ""
+    if config_path.exists():
+        existing_text = config_path.read_text(encoding="utf-8")
+
+    newline = detect_newline(existing_text) if existing_text else os.linesep
+    lines = existing_text.splitlines() if existing_text else []
+    for section_name, assignments in build_codex_mcp_sections(agent_root, mempalace_repo, args.server_name):
+        lines = upsert_toml_section_values(lines, section_name, assignments)
+
+    rendered_text = newline.join(lines)
+    if lines:
+        rendered_text += newline
+
+    if rendered_text == existing_text:
+        print(f"Codex MCP config already up to date: {config_path}")
+    else:
+        with config_path.open("w", encoding="utf-8", newline="") as handle:
+            handle.write(rendered_text)
+        print(f"Installed MemPalace MCP into Codex config: {config_path}")
+
+    print(f"Server: {args.server_name}")
+    print(f"Command: {render_agent_relative_path(preferred_venv_python_path(mempalace_repo), agent_root)}")
+    print(
+        "Args: "
+        + toml_array(
+            [render_agent_relative_path(script_dir() / "mempalace_tools.py", agent_root), "start-mcp"]
+        )
+    )
+    return 0
 
 
 def run_daemon(args: argparse.Namespace) -> int:
@@ -1181,6 +1369,18 @@ def build_parser() -> argparse.ArgumentParser:
     setup_parser.add_argument("--python-exe", default="")
     setup_parser.add_argument("--force-recreate", action="store_true")
     setup_parser.set_defaults(func=run_setup)
+
+    install_parser = subparsers.add_parser(
+        "install-agent-mcp",
+        help="Install the local MemPalace MCP config into this project's agent config.",
+    )
+    install_parser.add_argument("--agent", choices=["codex"], default="codex")
+    install_parser.add_argument("--agent-root", default=str(default_agent_root()))
+    install_parser.add_argument("--workspace-root", default=str(default_workspace_root()))
+    install_parser.add_argument("--mempalace-repo", default=str(default_repo_root()))
+    install_parser.add_argument("--codex-config-path", default=str(default_codex_config_path()))
+    install_parser.add_argument("--server-name", default="mempalace")
+    install_parser.set_defaults(func=run_install_agent_mcp)
 
     refresh_parser = subparsers.add_parser("refresh", help="Mine all wings from knowledges-cache into the palace.")
     add_shared_refresh_arguments(refresh_parser)
