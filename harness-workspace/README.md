@@ -537,6 +537,12 @@ mempalace_tools.py
 - 首次在新机器 bootstrap 时，用系统 Python 跑一次 `setup`
 - `setup` 成功后，后续命令统一走 `mempalace-github-code/.venv` 里的 Python
 
+Windows 推荐优先用这些批处理入口：
+
+- 安装本地 Agent MCP：`.\tools\mempalace-install-agent-mcp.bat`
+- 全量重建：`.\tools\mempalace-rebuild.bat`
+- 常驻 daemon：`.\tools\mempalace-daemon.bat`
+
 ### 10.1 安装和初始化
 
 macOS / Linux:
@@ -564,7 +570,10 @@ python .\tools\mempalace_tools.py setup
 
 ### 10.2 安装本地 Agent MCP
 
-当前阶段只支持把 MemPalace 安装到当前项目根目录的 `.codex/config.toml`。
+这个命令现在支持两个本地 target：
+
+- `codex`：写当前项目根目录的 `.codex/config.toml`
+- `claude-code`：调用 `claude mcp add -s local`，写 Claude Code 的本地项目作用域配置
 
 macOS / Linux:
 
@@ -575,14 +584,16 @@ macOS / Linux:
 Windows:
 
 ```powershell
-.\mempalace-github-code\.venv\Scripts\python.exe .\tools\mempalace_tools.py install-agent-mcp
+.\tools\mempalace-install-agent-mcp.bat
 ```
 
 作用：
 
-- 自动创建或更新当前项目的 `.codex/config.toml`
-- 定点写入 `mcp_servers.mempalace`
-- 不会重写无关的其他 section
+- 如果没传 `--agent`，会在终端里让你选择 `codex` 或 `claude-code`
+- `--agent codex` 时，会自动创建或更新当前项目的 `.codex/config.toml`
+- `--agent claude-code` 时，会调用本机 `claude` CLI 安装到 Claude Code 本地项目配置
+- `codex` 安装模式下，只会定点写入 `mcp_servers.mempalace`，不会重写无关 section
+- Windows 下日常推荐直接用 `.\tools\mempalace-install-agent-mcp.bat --agent codex` 或 `.\tools\mempalace-install-agent-mcp.bat --agent claude-code`
 
 ### 10.3 手动刷新
 
@@ -614,13 +625,15 @@ macOS / Linux:
 Windows:
 
 ```powershell
-.\mempalace-github-code\.venv\Scripts\python.exe .\tools\mempalace_tools.py rebuild
+.\tools\mempalace-rebuild.bat
 ```
 
 适合：
 
-- 你明确要重建一个非托管 palace
+- 你要强制做一次全量重建
+- 默认 managed root 上会走蓝绿全量重建
 - 需要验证从零开始的构建链路
+- Windows 下日常推荐直接用 `.\tools\mempalace-rebuild.bat`
 
 不适合：
 
@@ -650,27 +663,38 @@ Windows:
 macOS / Linux:
 
 ```bash
-./mempalace-github-code/.venv/bin/python3 ./tools/mempalace_tools.py daemon
+./mempalace-github-code/.venv/bin/python3 ./tools/mempalace_tools.py daemon-start
 ```
 
 Windows:
 
 ```powershell
-.\mempalace-github-code\.venv\Scripts\python.exe .\tools\mempalace_tools.py daemon
+.\tools\mempalace-daemon.bat
 ```
+
+说明：
+
+- `daemon-run` 会先安全停掉旧 daemon，再在当前终端里直接跑前台 daemon
+- `mempalace-daemon.bat` / `mempalace-daemon.sh` 现在默认执行 `daemon-run`
+- 前台模式下，你会一直看到日志；按 `Ctrl+C` 就会关闭 daemon
+- `daemon-start` 会把 daemon 脱离当前终端，后台常驻
+- 关闭当前 Codex / Claude Code / 终端后，后台 daemon 仍然继续轮询
+- 如果你就是想看前台实时输出，才直接用 `daemon`
+- `daemon-restart` 默认先等当前 refresh 空闲，再重启；只有传 `--force` 才会中断正在进行的 refresh
+- Windows 下日常推荐直接用 `.\tools\mempalace-daemon.bat`
 
 常用参数：
 
 macOS / Linux:
 
 ```bash
-./mempalace-github-code/.venv/bin/python3 ./tools/mempalace_tools.py daemon --debounce-seconds 3 --keep-versions 3
+./mempalace-github-code/.venv/bin/python3 ./tools/mempalace_tools.py daemon-start --debounce-seconds 3 --keep-versions 3
 ```
 
 Windows:
 
 ```powershell
-.\mempalace-github-code\.venv\Scripts\python.exe .\tools\mempalace_tools.py daemon --debounce-seconds 3 --keep-versions 3
+.\mempalace-github-code\.venv\Scripts\python.exe .\tools\mempalace_tools.py daemon-start --debounce-seconds 3 --keep-versions 3
 ```
 
 ### 10.7 只跑一次守护刷新
@@ -692,6 +716,26 @@ Windows:
 - 手动验证刷新链路
 - CI 或临时操作
 - 不想常驻 daemon
+
+### 10.8 查看或关闭守护进程
+
+macOS / Linux:
+
+```bash
+./mempalace-github-code/.venv/bin/python3 ./tools/mempalace_tools.py daemon-run
+./mempalace-github-code/.venv/bin/python3 ./tools/mempalace_tools.py daemon-status
+./mempalace-github-code/.venv/bin/python3 ./tools/mempalace_tools.py daemon-stop
+./mempalace-github-code/.venv/bin/python3 ./tools/mempalace_tools.py daemon-restart
+```
+
+Windows:
+
+```powershell
+.\mempalace-github-code\.venv\Scripts\python.exe .\tools\mempalace_tools.py daemon-run
+.\mempalace-github-code\.venv\Scripts\python.exe .\tools\mempalace_tools.py daemon-status
+.\mempalace-github-code\.venv\Scripts\python.exe .\tools\mempalace_tools.py daemon-stop
+.\mempalace-github-code\.venv\Scripts\python.exe .\tools\mempalace_tools.py daemon-restart
+```
 
 ---
 
@@ -718,10 +762,14 @@ repo .venv python -> mempalace_tools.py start-mcp
 对应命令：
 
 - Windows `setup`：`python .\tools\mempalace_tools.py setup`
-- Windows 安装 Codex MCP：`.\mempalace-github-code\.venv\Scripts\python.exe .\tools\mempalace_tools.py install-agent-mcp`
-- Windows 后续命令：`.\mempalace-github-code\.venv\Scripts\python.exe .\tools\mempalace_tools.py <command>`
+- Windows 安装本地 Codex MCP：`.\tools\mempalace-install-agent-mcp.bat --agent codex`
+- Windows 安装本地 Claude Code MCP：`.\tools\mempalace-install-agent-mcp.bat --agent claude-code`
+- Windows 启动常驻 daemon：`.\tools\mempalace-daemon.bat`
+- Windows 全量重建：`.\tools\mempalace-rebuild.bat`
+- Windows 其他高级命令：`.\mempalace-github-code\.venv\Scripts\python.exe .\tools\mempalace_tools.py <command>`
 - macOS / Linux `setup`：`python3 ./tools/mempalace_tools.py setup`
-- macOS / Linux 安装 Codex MCP：`./mempalace-github-code/.venv/bin/python3 ./tools/mempalace_tools.py install-agent-mcp`
+- macOS / Linux 安装本地 Codex MCP：`./mempalace-github-code/.venv/bin/python3 ./tools/mempalace_tools.py install-agent-mcp --agent codex`
+- macOS / Linux 安装本地 Claude Code MCP：`./mempalace-github-code/.venv/bin/python3 ./tools/mempalace_tools.py install-agent-mcp --agent claude-code`
 - macOS / Linux 后续命令：`./mempalace-github-code/.venv/bin/python3 ./tools/mempalace_tools.py <command>`
 
 ### 11.2 日常写知识
@@ -751,7 +799,7 @@ query through MCP
 适合你持续维护知识源。
 
 ```text
-开 daemon 常驻
+开 daemon-run 占住当前终端
     |
     +-- 改文档
     +-- 等去抖
@@ -865,7 +913,7 @@ No knowledge changes detected. Keeping current active palace.
 - `.codex/config.toml` 里的 Python 是否指向 `harness-workspace/mempalace-github-code/.venv`
 - `.codex/config.toml` 里 `mempalace_tools.py` 路径是否有效
 - `mempalace-github-code/.venv` 是否存在
-- 可以直接重新执行一次 `install-agent-mcp` 修复本地 Codex 配置
+- 可以直接重新执行一次 `install-agent-mcp --agent codex` 或 `install-agent-mcp --agent claude-code` 修复本地 agent 配置
 
 ---
 

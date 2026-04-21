@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import atexit
+import ctypes
 import json
 import os
 import re
@@ -46,13 +47,19 @@ class DaemonLogger:
     def __init__(self, log_path: Path) -> None:
         self.log_path = log_path
         self.log_path.parent.mkdir(parents=True, exist_ok=True)
+        self.stdout_available = True
 
     def log(self, message: str, level: str = "INFO") -> None:
         timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
         line = f"[{timestamp}] [{level.upper()}] {message}"
-        print(line, flush=True)
         with self.log_path.open("a", encoding="utf-8") as handle:
             handle.write(line + "\n")
+        if not self.stdout_available:
+            return
+        try:
+            print(line, flush=True)
+        except (BrokenPipeError, OSError, ValueError):
+            self.stdout_available = False
 
 
 class LockFile:
@@ -108,7 +115,7 @@ def default_workspace_root() -> Path:
     return script_dir().parent
 
 
-def default_agent_root() -> Path:
+def default_project_root() -> Path:
     return default_workspace_root().parent
 
 
@@ -124,8 +131,8 @@ def default_palace_path() -> Path:
     return default_workspace_root() / ".mempalace_local" / "palace"
 
 
-def default_codex_config_path() -> Path:
-    return default_agent_root() / ".codex" / "config.toml"
+def default_daemon_root() -> Path:
+    return default_workspace_root() / ".mempalace_local" / "refresh-daemon"
 
 
 CURRENT_POINTER_FILENAME = "current.json"
@@ -168,6 +175,18 @@ def palace_snapshot_path(palace_path: Path) -> Path:
     return palace_path / PALACE_SNAPSHOT_FILENAME
 
 
+def daemon_lock_path(daemon_root: Path) -> Path:
+    return daemon_root / "daemon.lock"
+
+
+def daemon_state_path(daemon_root: Path) -> Path:
+    return daemon_root / "state.json"
+
+
+def daemon_log_path(daemon_root: Path) -> Path:
+    return daemon_root / "daemon.log"
+
+
 def has_palace_database(path: Path) -> bool:
     return (path / PALACE_DB_FILENAME).is_file()
 
@@ -177,6 +196,20 @@ def write_json_atomic(path: Path, payload: dict) -> None:
     temp_path = path.with_name(f"{path.name}.tmp")
     temp_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
     temp_path.replace(path)
+
+
+def load_json_file(path: Path) -> dict | None:
+    if not path.is_file():
+        return None
+
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise RuntimeError(f"Invalid JSON file: {path}") from exc
+
+    if not isinstance(payload, dict):
+        raise RuntimeError(f"Invalid JSON payload: {path}")
+    return payload
 
 
 def load_current_pointer(palace_root: Path) -> dict | None:
@@ -371,6 +404,108 @@ def command_exists(name: str) -> str | None:
     return shutil.which(name)
 
 
+def disable_windows_console_quick_edit() -> None:
+    if os.name != "nt":
+        return
+
+    try:
+        kernel32 = ctypes.windll.kernel32
+        stdin_handle = kernel32.GetStdHandle(-10)
+        if stdin_handle in (0, -1):
+            return
+
+        mode = ctypes.c_uint()
+        if not kernel32.GetConsoleMode(stdin_handle, ctypes.byref(mode)):
+            return
+
+        enable_quick_edit_mode = 0x0040
+        enable_extended_flags = 0x0080
+        updated_mode = (mode.value | enable_extended_flags) & ~enable_quick_edit_mode
+        if updated_mode != mode.value:
+            kernel32.SetConsoleMode(stdin_handle, updated_mode)
+    except Exception:
+        return
+
+
+def daemon_root_from_workspace(workspace_root: Path) -> Path:
+    return workspace_root / ".mempalace_local" / "refresh-daemon"
+
+
+def read_daemon_lock(daemon_root: Path) -> dict | None:
+    return load_json_file(daemon_lock_path(daemon_root))
+
+
+def read_daemon_state(daemon_root: Path) -> dict | None:
+    return load_json_file(daemon_state_path(daemon_root))
+
+
+def daemon_pid_from_payload(payload: dict | None) -> int:
+    if not isinstance(payload, dict):
+        return 0
+    try:
+        return int(payload.get("pid", 0))
+    except (TypeError, ValueError):
+        return 0
+
+
+def build_daemon_command(args: argparse.Namespace, mempalace_repo: Path) -> list[str]:
+    python_exe = resolve_background_venv_python(mempalace_repo)
+    command = [
+        str(python_exe),
+        str(script_dir() / "mempalace_tools.py"),
+        "daemon",
+        "--workspace-root",
+        str(args.workspace_root),
+        "--palace-path",
+        str(args.palace_path),
+        "--mempalace-repo",
+        str(args.mempalace_repo),
+        "--knowledge-cache-root",
+        str(args.knowledge_cache_root),
+        "--debounce-seconds",
+        str(args.debounce_seconds),
+        "--poll-seconds",
+        str(args.poll_seconds),
+        "--keep-versions",
+        str(args.keep_versions),
+    ]
+    if args.no_initial_refresh:
+        command.append("--no-initial-refresh")
+    return command
+
+
+def start_background_process(command: Sequence[str], cwd: Path) -> subprocess.Popen:
+    kwargs = {
+        "cwd": str(cwd),
+        "stdin": subprocess.DEVNULL,
+        "stdout": subprocess.DEVNULL,
+        "stderr": subprocess.DEVNULL,
+        "close_fds": True,
+    }
+    if os.name == "nt":
+        kwargs["creationflags"] = 0x00000008 | 0x00000200 | 0x08000000
+    else:
+        kwargs["start_new_session"] = True
+    return subprocess.Popen(command, **kwargs)
+
+
+def stop_process_tree(pid: int) -> None:
+    if os.name == "nt":
+        result = subprocess.run(
+            ["taskkill", "/PID", str(pid), "/T", "/F"],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+        )
+        if result.returncode != 0:
+            detail = (result.stdout or result.stderr or "").strip()
+            raise RuntimeError(f"Failed to stop daemon process {pid}: {detail}")
+        return
+
+    os.kill(pid, signal.SIGTERM)
+
+
 def pid_exists(pid: int) -> bool:
     if pid <= 0:
         return False
@@ -463,10 +598,22 @@ def resolve_venv_python(mempalace_repo: Path) -> Path:
     raise FileNotFoundError(f"MemPalace venv python not found under {mempalace_repo / '.venv'}")
 
 
+def resolve_background_venv_python(mempalace_repo: Path) -> Path:
+    if os.name == "nt":
+        pythonw = mempalace_repo / ".venv" / "Scripts" / "pythonw.exe"
+        if pythonw.exists():
+            return pythonw.resolve()
+    return resolve_venv_python(mempalace_repo)
+
+
 def preferred_venv_python_path(mempalace_repo: Path) -> Path:
     if os.name == "nt":
         return mempalace_repo / ".venv" / "Scripts" / "python.exe"
     return mempalace_repo / ".venv" / "bin" / "python3"
+
+
+def claude_config_path() -> Path:
+    return Path.home() / ".claude.json"
 
 
 def format_tool_command(python_exe: Path, *tool_args: str) -> str:
@@ -475,9 +622,9 @@ def format_tool_command(python_exe: Path, *tool_args: str) -> str:
     return " ".join(command)
 
 
-def render_agent_relative_path(path: Path, agent_root: Path) -> str:
+def render_project_relative_path(path: Path, project_root: Path) -> str:
     resolved_path = path.expanduser().resolve()
-    resolved_root = agent_root.expanduser().resolve()
+    resolved_root = project_root.expanduser().resolve()
     try:
         relative_path = resolved_path.relative_to(resolved_root)
     except ValueError:
@@ -500,6 +647,42 @@ def detect_newline(text: str) -> str:
     if "\r\n" in text:
         return "\r\n"
     return "\n"
+
+
+def canonical_agent_name(agent_name: str) -> str:
+    lowered = agent_name.strip().lower()
+    if lowered == "codex":
+        return "codex"
+    if lowered in {"claude", "claude-code", "claude_code"}:
+        return "claude-code"
+    raise ValueError(f"Unsupported agent target: {agent_name}")
+
+
+def prompt_install_agent_target() -> str:
+    print("Select local agent target for this project:")
+    print("  1. local codex")
+    print("  2. local claude-code")
+
+    while True:
+        try:
+            response = input("Enter 1 or 2 [1]: ").strip()
+        except EOFError:
+            return "codex"
+
+        if not response or response == "1":
+            return "codex"
+        if response == "2":
+            return "claude-code"
+        print("Invalid selection. Enter 1 for local codex or 2 for local claude-code.")
+
+
+def resolve_install_agent_target(requested_agent: str | None) -> str:
+    if requested_agent:
+        return canonical_agent_name(requested_agent)
+    if sys.stdin.isatty():
+        return prompt_install_agent_target()
+    print("No --agent specified in non-interactive mode. Defaulting to local codex.")
+    return "codex"
 
 
 def find_toml_section_bounds(lines: Sequence[str], section_name: str) -> tuple[int, int] | None:
@@ -562,12 +745,12 @@ def upsert_toml_section_values(
 
 
 def build_codex_mcp_sections(
-    agent_root: Path,
+    project_root: Path,
     mempalace_repo: Path,
     server_name: str,
 ) -> list[tuple[str, list[tuple[str, str]]]]:
-    python_path = render_agent_relative_path(preferred_venv_python_path(mempalace_repo), agent_root)
-    tool_path = render_agent_relative_path(script_dir() / "mempalace_tools.py", agent_root)
+    python_path = render_project_relative_path(preferred_venv_python_path(mempalace_repo), project_root)
+    tool_path = render_project_relative_path(script_dir() / "mempalace_tools.py", project_root)
     return [
         (
             f"mcp_servers.{server_name}",
@@ -585,6 +768,48 @@ def build_codex_mcp_sections(
             [("approval_mode", toml_string("approve"))],
         ),
     ]
+
+
+def desired_claude_local_server(mempalace_repo: Path) -> dict:
+    return {
+        "type": "stdio",
+        "command": str(preferred_venv_python_path(mempalace_repo)),
+        "args": [str(script_dir() / "mempalace_tools.py"), "start-mcp"],
+        "env": {},
+    }
+
+
+def load_claude_project_server(project_root: Path, server_name: str) -> dict | None:
+    config_path = claude_config_path()
+    if not config_path.exists():
+        return None
+
+    try:
+        payload = json.loads(config_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise RuntimeError(f"Invalid Claude config file: {config_path}") from exc
+
+    projects = payload.get("projects")
+    if not isinstance(projects, dict):
+        return None
+
+    resolved_project_root = project_root.resolve()
+    for project_key, project_payload in projects.items():
+        if not isinstance(project_payload, dict):
+            continue
+        try:
+            if Path(project_key).expanduser().resolve() != resolved_project_root:
+                continue
+        except OSError:
+            continue
+
+        mcp_servers = project_payload.get("mcpServers")
+        if not isinstance(mcp_servers, dict):
+            continue
+        server_payload = mcp_servers.get(server_name)
+        if isinstance(server_payload, dict):
+            return server_payload
+    return None
 
 
 def run_command(command: Sequence[str], *, cwd: Path | None = None) -> None:
@@ -1028,6 +1253,52 @@ def write_state(
     state_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
+def format_daemon_summary(daemon_root: Path) -> list[str]:
+    lock_payload = read_daemon_lock(daemon_root)
+    state_payload = read_daemon_state(daemon_root)
+    pid = daemon_pid_from_payload(lock_payload or state_payload)
+    is_running = pid_exists(pid)
+
+    lines = [
+        f"Daemon root: {daemon_root}",
+        f"Lock file: {daemon_lock_path(daemon_root)}",
+        f"State file: {daemon_state_path(daemon_root)}",
+        f"Log file: {daemon_log_path(daemon_root)}",
+        f"Running: {'yes' if is_running else 'no'}",
+        f"PID: {pid if pid > 0 else 'unknown'}",
+    ]
+
+    if isinstance(state_payload, dict):
+        lines.append(f"Last refresh status: {state_payload.get('last_refresh_status', 'unknown')}")
+        lines.append(f"Last refresh at: {state_payload.get('last_refresh_at') or 'never'}")
+        lines.append(f"Pending count: {state_payload.get('pending_count', 0)}")
+        lines.append(f"Tracked files: {state_payload.get('tracked_files', 0)}")
+        if state_payload.get("last_error"):
+            lines.append(f"Last error: {state_payload['last_error']}")
+
+    return lines
+
+
+def daemon_refresh_running(daemon_root: Path) -> bool:
+    state_payload = read_daemon_state(daemon_root)
+    if not isinstance(state_payload, dict):
+        return False
+    return state_payload.get("last_refresh_status") == "running"
+
+
+def wait_for_daemon_idle(daemon_root: Path, timeout_seconds: float) -> bool:
+    deadline = time.time() + max(timeout_seconds, 0.0)
+    while time.time() < deadline:
+        lock_payload = read_daemon_lock(daemon_root)
+        pid = daemon_pid_from_payload(lock_payload)
+        if pid <= 0 or not pid_exists(pid):
+            return True
+        if not daemon_refresh_running(daemon_root):
+            return True
+        time.sleep(0.2)
+    return not daemon_refresh_running(daemon_root)
+
+
 def install_signal_handlers(lock_file: LockFile, logger: DaemonLogger) -> None:
     def handle_signal(signum, _frame):
         logger.log(f"Received signal {signum}, stopping daemon.")
@@ -1096,7 +1367,7 @@ def run_setup(args: argparse.Namespace) -> int:
     print(f"Preferred runner after setup: {venv_python}")
     print(f"Refresh with: {format_tool_command(venv_python, 'refresh')}")
     print(f"Start MCP with: {format_tool_command(venv_python, 'start-mcp')}")
-    print(f"Install local Codex MCP with: {format_tool_command(venv_python, 'install-agent-mcp')}")
+    print(f"Install local agent MCP with: {format_tool_command(venv_python, 'install-agent-mcp')}")
     return 0
 
 
@@ -1113,12 +1384,44 @@ def run_refresh(args: argparse.Namespace) -> int:
     return 0
 
 
+def run_blue_green_rebuild_core(args: argparse.Namespace, logger) -> Path:
+    paths = prepare_refresh_context(args)
+    palace_root = paths["palace_path"]
+    palace_root.mkdir(parents=True, exist_ok=True)
+    active_before = bootstrap_current_pointer_if_needed(palace_root, logger)
+    version_path = create_versioned_palace_dir(palace_root)
+
+    try:
+        logger.log("Starting full rebuild for managed palace root without seed copy.")
+        refresh_palace(version_path, paths["mempalace_repo"], paths["knowledge_cache_root"], logger)
+        write_source_snapshot(version_path, build_snapshot(paths["knowledge_cache_root"]))
+    except Exception:
+        shutil.rmtree(version_path, ignore_errors=True)
+        raise
+
+    write_current_pointer(palace_root, version_path, version_path.name)
+    logger.log(f"Activated rebuilt palace version: {version_path}")
+    if active_before is not None and active_before != version_path:
+        logger.log(f"Previous active palace: {active_before}")
+
+    prune_old_versions(palace_root, getattr(args, "keep_versions", 3), version_path, logger)
+    return version_path
+
+
 def run_rebuild(args: argparse.Namespace) -> int:
+    logger = StdoutLogger()
     paths = build_refresh_paths(args)
     ensure_required_path(paths["workspace_root"], "Workspace root")
+    palace_path = paths["palace_path"]
+    if is_managed_palace_root(palace_path):
+        logger.log(f"Detected managed palace root, using blue-green full rebuild: {palace_path}")
+        version_path = run_blue_green_rebuild_core(args, logger)
+        logger.log(f"Blue-green full rebuild complete. Active palace: {version_path}")
+        return 0
+
     ensure_unmanaged_palace_path(paths["palace_path"])
     remove_tree_if_exists(paths["palace_path"], paths["workspace_root"], "Palace path")
-    run_refresh_core(args, StdoutLogger())
+    run_refresh_core(args, logger)
     return 0
 
 
@@ -1155,50 +1458,104 @@ def run_start_mcp(args: argparse.Namespace) -> int:
 
 
 def run_install_agent_mcp(args: argparse.Namespace) -> int:
-    if args.agent != "codex":
-        raise RuntimeError(f"Unsupported agent target: {args.agent}")
-
-    agent_root = Path(args.agent_root).expanduser().resolve()
+    agent_name = resolve_install_agent_target(args.agent)
+    project_root = Path(args.project_root).expanduser().resolve()
     workspace_root = Path(args.workspace_root).expanduser().resolve()
     mempalace_repo = Path(args.mempalace_repo).expanduser().resolve()
-    config_path = Path(args.codex_config_path).expanduser().resolve()
 
-    ensure_required_path(agent_root, "Agent root")
+    ensure_required_path(project_root, "Project root")
     ensure_required_path(workspace_root, "Workspace root")
     ensure_required_path(mempalace_repo, "MemPalace repo")
 
-    if not path_within(agent_root, workspace_root):
-        raise RuntimeError(f"Workspace root must stay within agent root: {workspace_root}")
+    if not path_within(project_root, workspace_root):
+        raise RuntimeError(f"Workspace root must stay within project root: {workspace_root}")
 
-    config_path.parent.mkdir(parents=True, exist_ok=True)
-    existing_text = ""
-    if config_path.exists():
-        existing_text = config_path.read_text(encoding="utf-8")
+    if agent_name == "codex":
+        config_path = (project_root / ".codex" / "config.toml").resolve()
+        config_path.parent.mkdir(parents=True, exist_ok=True)
+        existing_text = ""
+        if config_path.exists():
+            existing_text = config_path.read_text(encoding="utf-8")
 
-    newline = detect_newline(existing_text) if existing_text else os.linesep
-    lines = existing_text.splitlines() if existing_text else []
-    for section_name, assignments in build_codex_mcp_sections(agent_root, mempalace_repo, args.server_name):
-        lines = upsert_toml_section_values(lines, section_name, assignments)
+        newline = detect_newline(existing_text) if existing_text else os.linesep
+        lines = existing_text.splitlines() if existing_text else []
+        for section_name, assignments in build_codex_mcp_sections(project_root, mempalace_repo, args.server_name):
+            lines = upsert_toml_section_values(lines, section_name, assignments)
 
-    rendered_text = newline.join(lines)
-    if lines:
-        rendered_text += newline
+        rendered_text = newline.join(lines)
+        if lines:
+            rendered_text += newline
 
-    if rendered_text == existing_text:
-        print(f"Codex MCP config already up to date: {config_path}")
-    else:
-        with config_path.open("w", encoding="utf-8", newline="") as handle:
-            handle.write(rendered_text)
-        print(f"Installed MemPalace MCP into Codex config: {config_path}")
+        if rendered_text == existing_text:
+            print(f"Codex MCP config already up to date: {config_path}")
+        else:
+            with config_path.open("w", encoding="utf-8", newline="") as handle:
+                handle.write(rendered_text)
+            print(f"Installed MemPalace MCP into Codex config: {config_path}")
 
-    print(f"Server: {args.server_name}")
-    print(f"Command: {render_agent_relative_path(preferred_venv_python_path(mempalace_repo), agent_root)}")
-    print(
-        "Args: "
-        + toml_array(
-            [render_agent_relative_path(script_dir() / "mempalace_tools.py", agent_root), "start-mcp"]
+        print("Target: local Codex project config")
+        print(f"Server: {args.server_name}")
+        print(f"Command: {render_project_relative_path(preferred_venv_python_path(mempalace_repo), project_root)}")
+        print(
+            "Args: "
+            + toml_array(
+                [render_project_relative_path(script_dir() / "mempalace_tools.py", project_root), "start-mcp"]
+            )
         )
+        return 0
+
+    claude_exe = command_exists("claude")
+    if claude_exe is None:
+        raise FileNotFoundError("Claude Code CLI not found in PATH. Install `claude` first or choose codex.")
+
+    desired_server = desired_claude_local_server(mempalace_repo)
+    current_server = load_claude_project_server(project_root, args.server_name)
+    if current_server == desired_server:
+        print(f"Claude Code MCP config already up to date for project: {project_root}")
+        print(f"Target: local Claude Code project config ({claude_config_path()})")
+        print(f"Server: {args.server_name}")
+        print(f"Command: {desired_server['command']}")
+        print("Args: " + json.dumps(desired_server["args"], ensure_ascii=False))
+        return 0
+
+    if current_server is not None:
+        subprocess.run(
+            [claude_exe, "mcp", "remove", "-s", "local", args.server_name],
+            cwd=str(project_root),
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+        )
+
+    add_command = [
+        claude_exe,
+        "mcp",
+        "add",
+        "-s",
+        "local",
+        args.server_name,
+        "--",
+        desired_server["command"],
+        *desired_server["args"],
+    ]
+    result = subprocess.run(
+        add_command,
+        cwd=str(project_root),
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
     )
+    if result.returncode != 0:
+        detail = (result.stdout or result.stderr or "").strip()
+        raise RuntimeError(f"Claude Code MCP install failed ({result.returncode}): {detail}")
+
+    print(f"Installed MemPalace MCP into Claude Code local config for project: {project_root}")
+    print(f"Target: local Claude Code project config ({claude_config_path()})")
+    print(f"Server: {args.server_name}")
+    print(f"Command: {desired_server['command']}")
+    print("Args: " + json.dumps(desired_server["args"], ensure_ascii=False))
     return 0
 
 
@@ -1208,16 +1565,19 @@ def run_daemon(args: argparse.Namespace) -> int:
     if args.keep_versions < 0:
         raise ValueError("--keep-versions must be 0 or greater")
 
+    if not args.run_once:
+        disable_windows_console_quick_edit()
+
     paths = build_refresh_paths(args)
     ensure_required_path(paths["workspace_root"], "Workspace root")
     ensure_required_path(paths["knowledge_cache_root"], "Knowledge cache")
     ensure_required_path(paths["mempalace_repo"], "MemPalace repo")
 
-    daemon_root = paths["workspace_root"] / ".mempalace_local" / "refresh-daemon"
+    daemon_root = daemon_root_from_workspace(paths["workspace_root"])
     daemon_root.mkdir(parents=True, exist_ok=True)
-    logger = DaemonLogger(daemon_root / "daemon.log")
+    logger = DaemonLogger(daemon_log_path(daemon_root))
     lock_file = LockFile(
-        daemon_root / "daemon.lock",
+        daemon_lock_path(daemon_root),
         lambda: {
             "pid": os.getpid(),
             "started_at": iso_utc(time.time()),
@@ -1243,7 +1603,7 @@ def run_daemon(args: argparse.Namespace) -> int:
         last_change_at_monotonic = time.monotonic()
 
     write_state(
-        daemon_root / "state.json",
+        daemon_state_path(daemon_root),
         args,
         snapshot,
         pending_changes,
@@ -1259,7 +1619,7 @@ def run_daemon(args: argparse.Namespace) -> int:
         snapshot = build_snapshot(paths["knowledge_cache_root"])
         logger.log(f"Blue-green cutover complete. Active palace: {version_path}")
         write_state(
-            daemon_root / "state.json",
+            daemon_state_path(daemon_root),
             args,
             snapshot,
             {},
@@ -1284,7 +1644,7 @@ def run_daemon(args: argparse.Namespace) -> int:
             last_change_at_monotonic = time.monotonic()
             logger.log(f"Detected changes: {change_summary(detected_changes)}")
             write_state(
-                daemon_root / "state.json",
+                daemon_state_path(daemon_root),
                 args,
                 snapshot,
                 pending_changes,
@@ -1306,7 +1666,7 @@ def run_daemon(args: argparse.Namespace) -> int:
         last_refresh_status = "running"
         last_error = None
         write_state(
-            daemon_root / "state.json",
+            daemon_state_path(daemon_root),
             args,
             snapshot,
             pending_changes,
@@ -1340,7 +1700,7 @@ def run_daemon(args: argparse.Namespace) -> int:
             )
 
         write_state(
-            daemon_root / "state.json",
+            daemon_state_path(daemon_root),
             args,
             snapshot,
             pending_changes,
@@ -1349,6 +1709,150 @@ def run_daemon(args: argparse.Namespace) -> int:
             last_refresh_status,
             last_error,
         )
+
+
+def run_daemon_start(args: argparse.Namespace) -> int:
+    paths = build_refresh_paths(args)
+    ensure_required_path(paths["workspace_root"], "Workspace root")
+    ensure_required_path(paths["knowledge_cache_root"], "Knowledge cache")
+    ensure_required_path(paths["mempalace_repo"], "MemPalace repo")
+
+    daemon_root = daemon_root_from_workspace(paths["workspace_root"])
+    daemon_root.mkdir(parents=True, exist_ok=True)
+
+    lock_payload = read_daemon_lock(daemon_root)
+    existing_pid = daemon_pid_from_payload(lock_payload)
+    if existing_pid > 0 and pid_exists(existing_pid):
+        print("MemPalace daemon is already running.")
+        for line in format_daemon_summary(daemon_root):
+            print(line)
+        return 0
+
+    command = build_daemon_command(args, paths["mempalace_repo"])
+    process = start_background_process(command, paths["workspace_root"])
+    deadline = time.time() + 5.0
+
+    while time.time() < deadline:
+        if process.poll() is not None:
+            raise RuntimeError(f"Background daemon exited early with code {process.returncode}")
+        current_lock = read_daemon_lock(daemon_root)
+        daemon_pid = daemon_pid_from_payload(current_lock)
+        if daemon_pid > 0 and pid_exists(daemon_pid):
+            print("Started MemPalace daemon in background.")
+            print(f"PID: {daemon_pid}")
+            print(f"Log: {daemon_log_path(daemon_root)}")
+            print(f"State: {daemon_state_path(daemon_root)}")
+            return 0
+        time.sleep(0.2)
+
+    raise RuntimeError(
+        "Timed out waiting for daemon start. "
+        f"Check {daemon_log_path(daemon_root)} for more details."
+    )
+
+
+def run_daemon_stop(args: argparse.Namespace) -> int:
+    workspace_root = Path(args.workspace_root).expanduser().resolve()
+    ensure_required_path(workspace_root, "Workspace root")
+    daemon_root = daemon_root_from_workspace(workspace_root)
+
+    lock_payload = read_daemon_lock(daemon_root)
+    pid = daemon_pid_from_payload(lock_payload)
+    if pid <= 0:
+        print(f"No running daemon found for workspace: {workspace_root}")
+        return 0
+
+    if not pid_exists(pid):
+        daemon_lock_path(daemon_root).unlink(missing_ok=True)
+        print(f"Removed stale daemon lock for workspace: {workspace_root}")
+        return 0
+
+    stop_process_tree(pid)
+    deadline = time.time() + 5.0
+    while time.time() < deadline:
+        if not pid_exists(pid):
+            break
+        time.sleep(0.2)
+
+    if pid_exists(pid):
+        raise RuntimeError(f"Daemon process {pid} is still running after stop request.")
+
+    daemon_lock_path(daemon_root).unlink(missing_ok=True)
+    print(f"Stopped MemPalace daemon for workspace: {workspace_root}")
+    return 0
+
+
+def run_daemon_status(args: argparse.Namespace) -> int:
+    workspace_root = Path(args.workspace_root).expanduser().resolve()
+    ensure_required_path(workspace_root, "Workspace root")
+    daemon_root = daemon_root_from_workspace(workspace_root)
+
+    for line in format_daemon_summary(daemon_root):
+        print(line)
+    return 0
+
+
+def prepare_daemon_restart(args: argparse.Namespace) -> dict[str, Path]:
+    paths = build_refresh_paths(args)
+    ensure_required_path(paths["workspace_root"], "Workspace root")
+    ensure_required_path(paths["knowledge_cache_root"], "Knowledge cache")
+    ensure_required_path(paths["mempalace_repo"], "MemPalace repo")
+
+    daemon_root = daemon_root_from_workspace(paths["workspace_root"])
+    daemon_root.mkdir(parents=True, exist_ok=True)
+
+    lock_payload = read_daemon_lock(daemon_root)
+    existing_pid = daemon_pid_from_payload(lock_payload)
+    if existing_pid > 0 and pid_exists(existing_pid):
+        if daemon_refresh_running(daemon_root):
+            if not wait_for_daemon_idle(daemon_root, args.wait_for_idle_seconds):
+                if not args.force:
+                    raise RuntimeError(
+                        "Daemon is still refreshing. "
+                        "Rerun after it becomes idle or pass --force to interrupt the current refresh."
+                    )
+                print(
+                    "Warning: forcing daemon restart while a refresh is still running. "
+                    "The active palace stays safe, but the in-flight candidate build will be discarded."
+                )
+
+        stop_args = argparse.Namespace(workspace_root=str(paths["workspace_root"]))
+        run_daemon_stop(stop_args)
+
+    return paths
+
+
+def run_daemon_restart(args: argparse.Namespace) -> int:
+    paths = prepare_daemon_restart(args)
+
+    start_args = argparse.Namespace(
+        workspace_root=str(paths["workspace_root"]),
+        palace_path=str(paths["palace_path"]),
+        mempalace_repo=str(paths["mempalace_repo"]),
+        knowledge_cache_root=str(paths["knowledge_cache_root"]),
+        debounce_seconds=args.debounce_seconds,
+        poll_seconds=args.poll_seconds,
+        no_initial_refresh=args.no_initial_refresh,
+        keep_versions=args.keep_versions,
+    )
+    return run_daemon_start(start_args)
+
+
+def run_daemon_run(args: argparse.Namespace) -> int:
+    paths = prepare_daemon_restart(args)
+    print("Running MemPalace daemon in this terminal. Press Ctrl+C to stop.")
+    foreground_args = argparse.Namespace(
+        workspace_root=str(paths["workspace_root"]),
+        palace_path=str(paths["palace_path"]),
+        mempalace_repo=str(paths["mempalace_repo"]),
+        knowledge_cache_root=str(paths["knowledge_cache_root"]),
+        debounce_seconds=args.debounce_seconds,
+        poll_seconds=args.poll_seconds,
+        no_initial_refresh=args.no_initial_refresh,
+        run_once=False,
+        keep_versions=args.keep_versions,
+    )
+    return run_daemon(foreground_args)
 
 
 def add_shared_refresh_arguments(parser: argparse.ArgumentParser) -> None:
@@ -1372,13 +1876,17 @@ def build_parser() -> argparse.ArgumentParser:
 
     install_parser = subparsers.add_parser(
         "install-agent-mcp",
-        help="Install the local MemPalace MCP config into this project's agent config.",
+        help="Install MemPalace into this project's local agent config.",
     )
-    install_parser.add_argument("--agent", choices=["codex"], default="codex")
-    install_parser.add_argument("--agent-root", default=str(default_agent_root()))
+    install_parser.add_argument(
+        "--agent",
+        choices=["codex", "claude-code"],
+        default=None,
+        help="Target local agent host: codex or claude-code. Omit in an interactive terminal to choose.",
+    )
+    install_parser.add_argument("--project-root", default=str(default_project_root()))
     install_parser.add_argument("--workspace-root", default=str(default_workspace_root()))
     install_parser.add_argument("--mempalace-repo", default=str(default_repo_root()))
-    install_parser.add_argument("--codex-config-path", default=str(default_codex_config_path()))
     install_parser.add_argument("--server-name", default="mempalace")
     install_parser.set_defaults(func=run_install_agent_mcp)
 
@@ -1387,8 +1895,12 @@ def build_parser() -> argparse.ArgumentParser:
     refresh_parser.add_argument("--keep-versions", type=int, default=3)
     refresh_parser.set_defaults(func=run_refresh)
 
-    rebuild_parser = subparsers.add_parser("rebuild", help="Delete the palace and rebuild it from scratch.")
+    rebuild_parser = subparsers.add_parser(
+        "rebuild",
+        help="Rebuild the palace from scratch. Managed roots use blue-green cutover.",
+    )
     add_shared_refresh_arguments(rebuild_parser)
+    rebuild_parser.add_argument("--keep-versions", type=int, default=3)
     rebuild_parser.set_defaults(func=run_rebuild)
 
     mcp_parser = subparsers.add_parser("start-mcp", help="Start the local MemPalace MCP server.")
@@ -1405,6 +1917,57 @@ def build_parser() -> argparse.ArgumentParser:
     daemon_parser.add_argument("--run-once", action="store_true")
     daemon_parser.add_argument("--keep-versions", type=int, default=3)
     daemon_parser.set_defaults(func=run_daemon)
+
+    daemon_start_parser = subparsers.add_parser(
+        "daemon-start",
+        help="Start the MemPalace refresh daemon in the background.",
+    )
+    add_shared_refresh_arguments(daemon_start_parser)
+    daemon_start_parser.add_argument("--debounce-seconds", type=float, default=3.0)
+    daemon_start_parser.add_argument("--poll-seconds", type=float, default=2.0)
+    daemon_start_parser.add_argument("--no-initial-refresh", action="store_true")
+    daemon_start_parser.add_argument("--keep-versions", type=int, default=3)
+    daemon_start_parser.set_defaults(func=run_daemon_start)
+
+    daemon_stop_parser = subparsers.add_parser(
+        "daemon-stop",
+        help="Stop the background MemPalace refresh daemon for this workspace.",
+    )
+    daemon_stop_parser.add_argument("--workspace-root", default=str(default_workspace_root()))
+    daemon_stop_parser.set_defaults(func=run_daemon_stop)
+
+    daemon_status_parser = subparsers.add_parser(
+        "daemon-status",
+        help="Show MemPalace refresh daemon status for this workspace.",
+    )
+    daemon_status_parser.add_argument("--workspace-root", default=str(default_workspace_root()))
+    daemon_status_parser.set_defaults(func=run_daemon_status)
+
+    daemon_restart_parser = subparsers.add_parser(
+        "daemon-restart",
+        help="Restart the background MemPalace refresh daemon for this workspace.",
+    )
+    add_shared_refresh_arguments(daemon_restart_parser)
+    daemon_restart_parser.add_argument("--debounce-seconds", type=float, default=3.0)
+    daemon_restart_parser.add_argument("--poll-seconds", type=float, default=2.0)
+    daemon_restart_parser.add_argument("--no-initial-refresh", action="store_true")
+    daemon_restart_parser.add_argument("--keep-versions", type=int, default=3)
+    daemon_restart_parser.add_argument("--wait-for-idle-seconds", type=float, default=15.0)
+    daemon_restart_parser.add_argument("--force", action="store_true")
+    daemon_restart_parser.set_defaults(func=run_daemon_restart)
+
+    daemon_run_parser = subparsers.add_parser(
+        "daemon-run",
+        help="Restart any existing daemon if needed, then run the daemon in the current terminal.",
+    )
+    add_shared_refresh_arguments(daemon_run_parser)
+    daemon_run_parser.add_argument("--debounce-seconds", type=float, default=3.0)
+    daemon_run_parser.add_argument("--poll-seconds", type=float, default=2.0)
+    daemon_run_parser.add_argument("--no-initial-refresh", action="store_true")
+    daemon_run_parser.add_argument("--keep-versions", type=int, default=3)
+    daemon_run_parser.add_argument("--wait-for-idle-seconds", type=float, default=15.0)
+    daemon_run_parser.add_argument("--force", action="store_true")
+    daemon_run_parser.set_defaults(func=run_daemon_run)
 
     return parser
 

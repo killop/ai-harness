@@ -1,4 +1,0 @@
-interface:
-  display_name: "MemPalace Tools"
-  short_description: "Operate the local MemPalace workspace"
-  default_prompt: "Use $mempalace-tools to set up MemPalace, install the local Codex MCP entry, refresh knowledge, run the daemon, or start MCP for the local MemPalace workspace."

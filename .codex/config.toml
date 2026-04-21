@@ -1,5 +1,5 @@
 [mcp_servers.mempalace]
-command = "E:\\Programs\\Python\\Python313\\python.exe"
+command = ".\\harness-workspace\\mempalace-github-code\\.venv\\Scripts\\python.exe"
 args = [".\\harness-workspace\\tools\\mempalace_tools.py", "start-mcp"]
 
 [mcp_servers.mempalace.tools.mempalace_status]
