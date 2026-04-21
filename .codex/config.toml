@@ -1,3 +1,9 @@
 [mcp_servers.mempalace]
-command = "cmd"
-args = ["/c", ".\\.codex\\start_mempalace_mcp.cmd"]
+command = "E:\\Programs\\Python\\Python313\\python.exe"
+args = [".\\harness-workspace\\tools\\mempalace_tools.py", "start-mcp"]
+
+[mcp_servers.mempalace.tools.mempalace_status]
+approval_mode = "approve"
+
+[mcp_servers.mempalace.tools.mempalace_list_wings]
+approval_mode = "approve"

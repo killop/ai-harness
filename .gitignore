@@ -1,3 +1,7 @@
 /harness-workspace/.mempalace_local/
 /harness-workspace/mempalace-github-code/.mcp_data/
+/.mcp_data/
+/__pycache__/
+**/__pycache__/
+*.pyc
 /harness-workspace/mempalace-github-code/.tmp_*/

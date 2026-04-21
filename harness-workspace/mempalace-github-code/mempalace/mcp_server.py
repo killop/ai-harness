@@ -66,14 +66,20 @@ def _parse_args():
 
 _args = _parse_args()
 
-if _args.palace:
-    os.environ["MEMPALACE_PALACE_PATH"] = os.path.abspath(_args.palace)
+_requested_palace_path = os.path.abspath(_args.palace) if _args.palace else None
+
+if _requested_palace_path:
+    os.environ["MEMPALACE_PALACE_PATH"] = _requested_palace_path
 
 _config = MempalaceConfig()
+if _requested_palace_path is None:
+    _requested_palace_path = os.path.abspath(_config.palace_path)
+
+_runtime_palace_path = None
 # Only override KG path when --palace is explicitly provided; otherwise use
 # KnowledgeGraph's default (~/.mempalace/knowledge_graph.sqlite3).
 if _args.palace:
-    _kg = KnowledgeGraph(db_path=os.path.join(_config.palace_path, "knowledge_graph.sqlite3"))
+    _kg = KnowledgeGraph(db_path=os.path.join(_requested_palace_path, "knowledge_graph.sqlite3"))
 else:
     _kg = KnowledgeGraph()
 
@@ -134,6 +140,70 @@ def _wal_log(operation: str, params: dict, result: dict = None):
         logger.error(f"WAL write failed: {e}")
 
 
+def _resolve_managed_palace_path(base_path):
+    base_path = os.path.abspath(base_path)
+    pointer_path = os.path.join(base_path, "current.json")
+    if not os.path.isfile(pointer_path):
+        return base_path
+
+    try:
+        with open(pointer_path, "r", encoding="utf-8") as handle:
+            payload = json.load(handle)
+    except (OSError, json.JSONDecodeError):
+        logger.warning("Ignoring invalid palace pointer: %s", pointer_path)
+        return base_path
+
+    raw_path = payload.get("active_relative_path") or payload.get("active_path")
+    if not raw_path:
+        logger.warning("Ignoring palace pointer without active path: %s", pointer_path)
+        return base_path
+
+    candidate = raw_path if os.path.isabs(raw_path) else os.path.join(base_path, raw_path)
+    candidate = os.path.abspath(candidate)
+    try:
+        if os.path.commonpath([base_path, candidate]) != base_path:
+            logger.warning("Ignoring palace pointer outside root: %s", candidate)
+            return base_path
+    except ValueError:
+        logger.warning("Ignoring palace pointer on different drive: %s", candidate)
+        return base_path
+
+    if not os.path.isdir(candidate):
+        logger.warning("Ignoring missing active palace path: %s", candidate)
+        return base_path
+    return candidate
+
+
+def _ensure_runtime_palace():
+    global \
+        _runtime_palace_path, \
+        _client_cache, \
+        _collection_cache, \
+        _palace_db_inode, \
+        _palace_db_mtime, \
+        _metadata_cache, \
+        _metadata_cache_time, \
+        _kg
+    resolved_path = _resolve_managed_palace_path(_requested_palace_path)
+    if _runtime_palace_path == resolved_path:
+        return resolved_path
+
+    _runtime_palace_path = resolved_path
+    os.environ["MEMPALACE_PALACE_PATH"] = resolved_path
+    _client_cache = None
+    _collection_cache = None
+    _palace_db_inode = 0
+    _palace_db_mtime = 0.0
+    _metadata_cache = None
+    _metadata_cache_time = 0
+
+    if _args.palace:
+        _kg = KnowledgeGraph(db_path=os.path.join(resolved_path, "knowledge_graph.sqlite3"))
+
+    logger.info("Using palace path: %s", resolved_path)
+    return resolved_path
+
+
 def _get_client():
     """Return a ChromaDB PersistentClient, reconnecting if the database changed on disk.
 
@@ -153,7 +223,8 @@ def _get_client():
         _palace_db_mtime, \
         _metadata_cache, \
         _metadata_cache_time
-    db_path = os.path.join(_config.palace_path, "chroma.sqlite3")
+    active_palace_path = _ensure_runtime_palace()
+    db_path = os.path.join(active_palace_path, "chroma.sqlite3")
     try:
         st = os.stat(db_path)
         current_inode = st.st_ino
@@ -177,7 +248,7 @@ def _get_client():
     mtime_changed = current_mtime != 0.0 and abs(current_mtime - _palace_db_mtime) > 0.01
 
     if _client_cache is None or inode_changed or mtime_changed:
-        _client_cache = ChromaBackend.make_client(_config.palace_path)
+        _client_cache = ChromaBackend.make_client(active_palace_path)
         _collection_cache = None
         _metadata_cache = None
         _metadata_cache_time = 0
@@ -401,6 +472,7 @@ def tool_search(
     min_similarity: float = None,
     context: str = None,
 ):
+    palace_path = _ensure_runtime_palace()
     limit = max(1, min(limit, _MAX_RESULTS))
     try:
         wing = _sanitize_optional_name(wing, "wing")
@@ -415,7 +487,7 @@ def tool_search(
     sanitized = sanitize_query(query)
     result = search_memories(
         sanitized["clean_query"],
-        palace_path=_config.palace_path,
+        palace_path=palace_path,
         wing=wing,
         room=room,
         n_results=limit,
@@ -809,6 +881,7 @@ def tool_update_drawer(drawer_id: str, content: str = None, wing: str = None, ro
 
 def tool_kg_query(entity: str, as_of: str = None, direction: str = "both"):
     """Query the knowledge graph for an entity's relationships."""
+    _ensure_runtime_palace()
     try:
         entity = sanitize_name(entity, "entity")
     except ValueError as e:
@@ -823,6 +896,7 @@ def tool_kg_add(
     subject: str, predicate: str, object: str, valid_from: str = None, source_closet: str = None
 ):
     """Add a relationship to the knowledge graph."""
+    _ensure_runtime_palace()
     try:
         subject = sanitize_name(subject, "subject")
         predicate = sanitize_name(predicate, "predicate")
@@ -848,6 +922,7 @@ def tool_kg_add(
 
 def tool_kg_invalidate(subject: str, predicate: str, object: str, ended: str = None):
     """Mark a fact as no longer true (set end date)."""
+    _ensure_runtime_palace()
     try:
         subject = sanitize_name(subject, "subject")
         predicate = sanitize_name(predicate, "predicate")
@@ -868,6 +943,7 @@ def tool_kg_invalidate(subject: str, predicate: str, object: str, ended: str = N
 
 def tool_kg_timeline(entity: str = None):
     """Get chronological timeline of facts, optionally for one entity."""
+    _ensure_runtime_palace()
     if entity is not None:
         try:
             entity = sanitize_name(entity, "entity")
@@ -879,6 +955,7 @@ def tool_kg_timeline(entity: str = None):
 
 def tool_kg_stats():
     """Knowledge graph overview: entities, triples, relationship types."""
+    _ensure_runtime_palace()
     return _kg.stats()
 
 
@@ -1089,7 +1166,9 @@ def tool_reconnect():
     Use after external scripts or CLI commands modify the palace database
     directly, which can leave the in-memory HNSW index stale.
     """
-    global _collection_cache, _palace_db_inode, _palace_db_mtime
+    global _runtime_palace_path, _client_cache, _collection_cache, _palace_db_inode, _palace_db_mtime
+    _runtime_palace_path = None
+    _client_cache = None
     _collection_cache = None
     _palace_db_inode = 0
     _palace_db_mtime = 0.0
