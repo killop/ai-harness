@@ -194,6 +194,7 @@ tools/mempalace_tools.py
 所有常用动作都从这里进：
 
 - `setup`
+- `install-agent-mcp`
 - `refresh`
 - `rebuild`
 - `start-mcp`
@@ -307,7 +308,7 @@ Shared knowledge update path:
 ### 6.2 启动和查询关系
 
 ```text
-python tools/mempalace_tools.py start-mcp
+<repo .venv python> tools/mempalace_tools.py start-mcp
                 |
                 v
       mempalace.mcp_server --palace <logical root>
@@ -502,6 +503,7 @@ MCP query reads active version
 
 - MemPalace 源码副本
 - `setup` 会在这里创建 `.venv`
+- `setup` 之后，其余命令默认都应该走这里的 `.venv` Python
 - `start-mcp` 和 `refresh` 最终都依赖这里的 Python 环境和 CLI
 
 ### 9.5 `tools/mempalace_tools.py`
@@ -517,6 +519,7 @@ operator shell
 mempalace_tools.py
       |
       +-- setup
+      +-- install-agent-mcp
       +-- refresh
       +-- rebuild
       +-- start-mcp
@@ -528,6 +531,11 @@ mempalace_tools.py
 ## 10. 常用命令
 
 在 `harness-workspace/` 目录下执行。
+
+约定：
+
+- 首次在新机器 bootstrap 时，用系统 Python 跑一次 `setup`
+- `setup` 成功后，后续命令统一走 `mempalace-github-code/.venv` 里的 Python
 
 ### 10.1 安装和初始化
 
@@ -543,24 +551,51 @@ Windows:
 python .\tools\mempalace_tools.py setup
 ```
 
+说明：
+
+- 这里只是第一次创建 `.venv`
+- 后续 `refresh`、`daemon`、`start-mcp`、`rebuild` 都优先用 repo 内 `.venv` Python
+
 作用：
 
 - 创建专用虚拟环境
 - 安装 MemPalace 依赖
 - 校验 MCP 依赖能否正常导入
 
-### 10.2 手动刷新
+### 10.2 安装本地 Agent MCP
+
+当前阶段只支持把 MemPalace 安装到当前项目根目录的 `.codex/config.toml`。
 
 macOS / Linux:
 
 ```bash
-python3 ./tools/mempalace_tools.py refresh
+./mempalace-github-code/.venv/bin/python3 ./tools/mempalace_tools.py install-agent-mcp
 ```
 
 Windows:
 
 ```powershell
-python .\tools\mempalace_tools.py refresh
+.\mempalace-github-code\.venv\Scripts\python.exe .\tools\mempalace_tools.py install-agent-mcp
+```
+
+作用：
+
+- 自动创建或更新当前项目的 `.codex/config.toml`
+- 定点写入 `mcp_servers.mempalace`
+- 不会重写无关的其他 section
+
+### 10.3 手动刷新
+
+macOS / Linux:
+
+```bash
+./mempalace-github-code/.venv/bin/python3 ./tools/mempalace_tools.py refresh
+```
+
+Windows:
+
+```powershell
+.\mempalace-github-code\.venv\Scripts\python.exe .\tools\mempalace_tools.py refresh
 ```
 
 作用：
@@ -568,10 +603,18 @@ python .\tools\mempalace_tools.py refresh
 - 如果是 managed root，就走蓝绿增量刷新
 - 如果没有变化，会直接 no-op
 
-### 10.3 全量重建
+### 10.4 全量重建
+
+macOS / Linux:
 
 ```bash
-python3 ./tools/mempalace_tools.py rebuild
+./mempalace-github-code/.venv/bin/python3 ./tools/mempalace_tools.py rebuild
+```
+
+Windows:
+
+```powershell
+.\mempalace-github-code\.venv\Scripts\python.exe .\tools\mempalace_tools.py rebuild
 ```
 
 适合：
@@ -583,10 +626,18 @@ python3 ./tools/mempalace_tools.py rebuild
 
 - 日常在线刷新
 
-### 10.4 启动 MCP
+### 10.5 启动 MCP
+
+macOS / Linux:
 
 ```bash
-python3 ./tools/mempalace_tools.py start-mcp
+./mempalace-github-code/.venv/bin/python3 ./tools/mempalace_tools.py start-mcp
+```
+
+Windows:
+
+```powershell
+.\mempalace-github-code\.venv\Scripts\python.exe .\tools\mempalace_tools.py start-mcp
 ```
 
 作用：
@@ -594,22 +645,46 @@ python3 ./tools/mempalace_tools.py start-mcp
 - 启动本地 MemPalace MCP server
 - 让查询跟随 `current.json` 指向的 active version
 
-### 10.5 启动守护进程
+### 10.6 启动守护进程
+
+macOS / Linux:
 
 ```bash
-python3 ./tools/mempalace_tools.py daemon
+./mempalace-github-code/.venv/bin/python3 ./tools/mempalace_tools.py daemon
+```
+
+Windows:
+
+```powershell
+.\mempalace-github-code\.venv\Scripts\python.exe .\tools\mempalace_tools.py daemon
 ```
 
 常用参数：
 
+macOS / Linux:
+
 ```bash
-python3 ./tools/mempalace_tools.py daemon --debounce-seconds 3 --keep-versions 3
+./mempalace-github-code/.venv/bin/python3 ./tools/mempalace_tools.py daemon --debounce-seconds 3 --keep-versions 3
 ```
 
-### 10.6 只跑一次守护刷新
+Windows:
+
+```powershell
+.\mempalace-github-code\.venv\Scripts\python.exe .\tools\mempalace_tools.py daemon --debounce-seconds 3 --keep-versions 3
+```
+
+### 10.7 只跑一次守护刷新
+
+macOS / Linux:
 
 ```bash
-python3 ./tools/mempalace_tools.py daemon --run-once
+./mempalace-github-code/.venv/bin/python3 ./tools/mempalace_tools.py daemon --run-once
+```
+
+Windows:
+
+```powershell
+.\mempalace-github-code\.venv\Scripts\python.exe .\tools\mempalace_tools.py daemon --run-once
 ```
 
 适合：
@@ -628,14 +703,26 @@ python3 ./tools/mempalace_tools.py daemon --run-once
 git pull
    |
    v
-python tools/mempalace_tools.py setup
+system python -> mempalace_tools.py setup
    |
    v
-python tools/mempalace_tools.py daemon --run-once
+repo .venv python -> mempalace_tools.py install-agent-mcp
    |
    v
-python tools/mempalace_tools.py start-mcp
+repo .venv python -> mempalace_tools.py daemon --run-once
+   |
+   v
+repo .venv python -> mempalace_tools.py start-mcp
 ```
+
+对应命令：
+
+- Windows `setup`：`python .\tools\mempalace_tools.py setup`
+- Windows 安装 Codex MCP：`.\mempalace-github-code\.venv\Scripts\python.exe .\tools\mempalace_tools.py install-agent-mcp`
+- Windows 后续命令：`.\mempalace-github-code\.venv\Scripts\python.exe .\tools\mempalace_tools.py <command>`
+- macOS / Linux `setup`：`python3 ./tools/mempalace_tools.py setup`
+- macOS / Linux 安装 Codex MCP：`./mempalace-github-code/.venv/bin/python3 ./tools/mempalace_tools.py install-agent-mcp`
+- macOS / Linux 后续命令：`./mempalace-github-code/.venv/bin/python3 ./tools/mempalace_tools.py <command>`
 
 ### 11.2 日常写知识
 
@@ -775,8 +862,10 @@ No knowledge changes detected. Keeping current active palace.
 检查：
 
 - 是否先跑过 `setup`
-- `.codex/config.toml` 里 Python 和 `mempalace_tools.py` 路径是否有效
+- `.codex/config.toml` 里的 Python 是否指向 `harness-workspace/mempalace-github-code/.venv`
+- `.codex/config.toml` 里 `mempalace_tools.py` 路径是否有效
 - `mempalace-github-code/.venv` 是否存在
+- 可以直接重新执行一次 `install-agent-mcp` 修复本地 Codex 配置
 
 ---
 
