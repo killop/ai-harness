@@ -708,7 +708,10 @@ def resolve_venv_python(mempalace_repo: Path) -> Path:
     ]
     for candidate in candidates:
         if candidate.exists():
-            return candidate.resolve()
+            # Keep the venv-local executable path instead of resolving symlinks.
+            # On Debian/Ubuntu, .venv/bin/python3 often symlinks to /usr/bin/python3.x;
+            # dereferencing it breaks `python -m pip` by escaping the virtualenv.
+            return candidate
     raise FileNotFoundError(f"MemPalace venv python not found under {mempalace_repo / '.venv'}")
 
 
@@ -716,7 +719,7 @@ def resolve_background_venv_python(mempalace_repo: Path) -> Path:
     if os.name == "nt":
         pythonw = mempalace_repo / ".venv" / "Scripts" / "pythonw.exe"
         if pythonw.exists():
-            return pythonw.resolve()
+            return pythonw
     return resolve_venv_python(mempalace_repo)
 
 
@@ -1505,7 +1508,7 @@ def run_setup(args: argparse.Namespace) -> int:
         venv_python = resolve_venv_python(venv_path.parent if venv_path.name == ".venv" else venv_path.parent)
         if not path_within(venv_path, venv_python):
             venv_python = next(
-                candidate.resolve()
+                candidate
                 for candidate in (
                     venv_path / "Scripts" / "python.exe",
                     venv_path / "bin" / "python3",
