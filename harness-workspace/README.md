@@ -13,7 +13,71 @@
 
 ---
 
-## 1. 产品定位
+## 0. 阅读地图
+
+这份 README 同时写给两类读者：
+
+- 人手工操作时看：`0`、`10`、`11`、`14`
+- AI / 维护者 / 想理解设计时看：`1` 到 `9`、`12` 到 `16`
+
+如果你现在只是想“把这套东西跑起来”，不要从第 `1` 节开始读，直接先看下面的速查。
+
+### 0.1 Windows 人工执行速查
+
+这是 Windows 下最常手工执行的入口：
+
+```powershell
+首次安装：
+python .\tools\mempalace_tools.py setup
+.\tools\mempalace-install-agent-mcp.bat --agent codex
+
+日常全量重建：
+.\tools\mempalace-rebuild.bat
+
+日常常驻监听：
+.\tools\mempalace-daemon.bat
+
+手工停止 daemon：
+.\mempalace-github-code\.venv\Scripts\python.exe .\tools\mempalace_tools.py daemon-stop
+```
+
+补充：
+
+- 如果你用 Claude Code，就把 `--agent codex` 改成 `--agent claude-code`
+- 日常优先用 `.bat` 脚本，不要手敲长 Python 命令
+- `rebuild` 是“现在立刻做一次全量重建”
+- `daemon` 是“挂着持续监听，文件变了再自动刷新”
+
+### 0.2 macOS / Linux 人工执行速查
+
+```bash
+首次安装：
+python3 ./tools/mempalace_tools.py setup
+./mempalace-github-code/.venv/bin/python3 ./tools/mempalace_tools.py install-agent-mcp --agent codex
+
+日常全量重建：
+./mempalace-github-code/.venv/bin/python3 ./tools/mempalace_tools.py rebuild
+
+日常常驻监听：
+./mempalace-github-code/.venv/bin/python3 ./tools/mempalace_tools.py daemon-run
+
+手工停止 daemon：
+./mempalace-github-code/.venv/bin/python3 ./tools/mempalace_tools.py daemon-stop
+```
+
+### 0.3 人工执行时怎么选脚本
+
+- `setup`：新机器第一次安装时执行一次
+- `mempalace-install-agent-mcp.bat`：把本地 agent 接到当前项目的 MemPalace
+- `mempalace-rebuild.bat`：立刻做一次全量重建
+- `mempalace-daemon.bat`：前台跑 daemon，持续监听知识目录
+- `daemon-stop`：手工停掉后台或前台 daemon
+
+---
+
+下面从 `1` 开始，主要是设计和实现说明，偏 AI / 维护者阅读。
+
+## 1. 给 AI / 维护者看的产品定位
 
 这套东西的定位不是“文档仓库”，也不是“直接共享数据库”。
 
@@ -530,7 +594,7 @@ mempalace_tools.py
 
 ---
 
-## 10. 常用命令
+## 10. 给人看的常用命令（手工执行）
 
 在 `harness-workspace/` 目录下执行。
 
@@ -539,11 +603,26 @@ mempalace_tools.py
 - 首次在新机器 bootstrap 时，用系统 Python 跑一次 `setup`
 - `setup` 成功后，后续命令统一走 `mempalace-github-code/.venv` 里的 Python
 
+如果你是人在手工执行，先记住这一条：
+
+- Windows 优先用 `.bat`
+- macOS / Linux 优先用下面给出的整条命令
+- 除非排障，不需要自己拼 `mempalace_tools.py` 参数
+
 Windows 推荐优先用这些批处理入口：
 
 - 安装本地 Agent MCP：`.\tools\mempalace-install-agent-mcp.bat`
 - 全量重建：`.\tools\mempalace-rebuild.bat`
 - 常驻 daemon：`.\tools\mempalace-daemon.bat`
+
+最常见的人手工操作可以直接记成：
+
+```text
+第一次安装 -> setup
+接入本地 agent -> mempalace-install-agent-mcp.bat
+强制重建一次 -> mempalace-rebuild.bat
+持续监听刷新 -> mempalace-daemon.bat
+```
 
 ### 10.1 安装和初始化
 
@@ -743,7 +822,7 @@ Windows:
 
 ---
 
-## 11. 推荐使用方式
+## 11. 给人看的推荐使用方式
 
 ### 11.1 新机器首次接入
 
@@ -877,7 +956,7 @@ query through MCP
 
 ---
 
-## 14. 故障排查
+## 14. 给人看的故障排查
 
 ### 14.1 `refresh` 没反应
 
