@@ -13,65 +13,80 @@
 
 ---
 
-## 0. 阅读地图
+## 0. Windows 用户先看这里
+
+如果你是人在 Windows 上手工执行，这个 README 最重要的就是下面这几条。
+
+绝大多数人平时只需要认这 4 个入口：
+
+```powershell
+第一次安装：
+python .\tools\mempalace_tools.py setup
+.\tools\mempalace-install-agent-mcp.bat --agent codex
+
+平时开 daemon：
+.\tools\mempalace-daemon.bat
+
+需要强制全量重建：
+.\tools\mempalace-rebuild.bat
+
+需要手工停 daemon：
+.\mempalace-github-code\.venv\Scripts\python.exe .\tools\mempalace_tools.py daemon-stop
+```
+
+直接理解成：
+
+- `setup`：新机器第一次安装时执行一次
+- `mempalace-install-agent-mcp.bat`：把本地 agent 接到当前项目
+- `mempalace-daemon.bat`：平时就开这个，持续监听知识目录
+- `mempalace-rebuild.bat`：只有你明确要强制全量重建时才跑
+
+注意：
+
+- 如果你用 Claude Code，把 `--agent codex` 改成 `--agent claude-code`
+- 日常优先用 `.bat`，不要自己手敲长 Python 命令
+- 刚 `rebuild` 完再开 `daemon`，现在不会再无意义地重刷一遍
+
+## 0.1 阅读地图
 
 这份 README 同时写给两类读者：
 
 - 人手工操作时看：`0`、`10`、`11`、`14`
 - AI / 维护者 / 想理解设计时看：`1` 到 `9`、`12` 到 `16`
 
-如果你现在只是想“把这套东西跑起来”，不要从第 `1` 节开始读，直接先看下面的速查。
-
-### 0.1 Windows 人工执行速查
-
-这是 Windows 下最常手工执行的入口：
-
-```powershell
-首次安装：
-python .\tools\mempalace_tools.py setup
-.\tools\mempalace-install-agent-mcp.bat --agent codex
-
-日常全量重建：
-.\tools\mempalace-rebuild.bat
-
-日常常驻监听：
-.\tools\mempalace-daemon.bat
-
-手工停止 daemon：
-.\mempalace-github-code\.venv\Scripts\python.exe .\tools\mempalace_tools.py daemon-stop
-```
-
-补充：
-
-- 如果你用 Claude Code，就把 `--agent codex` 改成 `--agent claude-code`
-- 日常优先用 `.bat` 脚本，不要手敲长 Python 命令
-- `rebuild` 是“现在立刻做一次全量重建”
-- `daemon` 是“挂着持续监听，文件变了再自动刷新”
+如果你现在只是想“把这套东西跑起来”，不要从第 `1` 节开始读。
 
 ### 0.2 macOS / Linux 人工执行速查
 
 ```bash
 首次安装：
-python3 ./tools/mempalace_tools.py setup
-./mempalace-github-code/.venv/bin/python3 ./tools/mempalace_tools.py install-agent-mcp --agent codex
+bash ./tools/mempalace-setup.sh
+bash ./tools/mempalace-install-agent-mcp.sh --agent codex
 
 日常全量重建：
-./mempalace-github-code/.venv/bin/python3 ./tools/mempalace_tools.py rebuild
+bash ./tools/mempalace-rebuild.sh
 
 日常常驻监听：
-./mempalace-github-code/.venv/bin/python3 ./tools/mempalace_tools.py daemon-run
+bash ./tools/mempalace-daemon.sh
 
 手工停止 daemon：
 ./mempalace-github-code/.venv/bin/python3 ./tools/mempalace_tools.py daemon-stop
 ```
 
+注意：
+
+- macOS / Linux 这里用 `bash ./tools/*.sh`
+- 不要用 `sh ./tools/*.sh`
+- `daemon-stop`、`daemon-status`、`daemon-restart` 这类高级控制目前还是直接走 Python CLI
+
 ### 0.3 人工执行时怎么选脚本
 
 - `setup`：新机器第一次安装时执行一次
-- `mempalace-install-agent-mcp.bat`：把本地 agent 接到当前项目的 MemPalace
-- `mempalace-rebuild.bat`：立刻做一次全量重建
-- `mempalace-daemon.bat`：前台跑 daemon，持续监听知识目录
+- `mempalace-install-agent-mcp`：把本地 agent 接到当前项目的 MemPalace
+- `mempalace-rebuild`：立刻做一次全量重建
+- `mempalace-daemon`：前台跑 daemon，持续监听知识目录
 - `daemon-stop`：手工停掉后台或前台 daemon
+- macOS / Linux 对应的是同名 `.sh`，用法统一写成 `bash ./tools/<name>.sh`
 
 ---
 
@@ -594,7 +609,7 @@ mempalace_tools.py
 
 ---
 
-## 10. 给人看的常用命令（手工执行）
+## 10. 给人看的常用命令（详细版）
 
 在 `harness-workspace/` 目录下执行。
 
@@ -606,8 +621,9 @@ mempalace_tools.py
 如果你是人在手工执行，先记住这一条：
 
 - Windows 优先用 `.bat`
-- macOS / Linux 优先用下面给出的整条命令
+- macOS / Linux 优先用 `bash ./tools/*.sh`
 - 除非排障，不需要自己拼 `mempalace_tools.py` 参数
+- 顶部 `0` 节是最短路径，这一节是详细版
 
 Windows 推荐优先用这些批处理入口：
 
@@ -629,7 +645,7 @@ Windows 推荐优先用这些批处理入口：
 macOS / Linux:
 
 ```bash
-python3 ./tools/mempalace_tools.py setup
+bash ./tools/mempalace-setup.sh
 ```
 
 Windows:
@@ -659,7 +675,7 @@ python .\tools\mempalace_tools.py setup
 macOS / Linux:
 
 ```bash
-./mempalace-github-code/.venv/bin/python3 ./tools/mempalace_tools.py install-agent-mcp
+bash ./tools/mempalace-install-agent-mcp.sh
 ```
 
 Windows:
@@ -681,7 +697,7 @@ Windows:
 macOS / Linux:
 
 ```bash
-./mempalace-github-code/.venv/bin/python3 ./tools/mempalace_tools.py refresh
+bash ./tools/mempalace-refresh.sh
 ```
 
 Windows:
@@ -700,7 +716,7 @@ Windows:
 macOS / Linux:
 
 ```bash
-./mempalace-github-code/.venv/bin/python3 ./tools/mempalace_tools.py rebuild
+bash ./tools/mempalace-rebuild.sh
 ```
 
 Windows:
@@ -725,7 +741,7 @@ Windows:
 macOS / Linux:
 
 ```bash
-./mempalace-github-code/.venv/bin/python3 ./tools/mempalace_tools.py start-mcp
+bash ./tools/mempalace-start-mcp.sh
 ```
 
 Windows:
@@ -744,7 +760,7 @@ Windows:
 macOS / Linux:
 
 ```bash
-./mempalace-github-code/.venv/bin/python3 ./tools/mempalace_tools.py daemon-start
+bash ./tools/mempalace-daemon.sh
 ```
 
 Windows:
@@ -771,7 +787,7 @@ Windows:
 macOS / Linux:
 
 ```bash
-./mempalace-github-code/.venv/bin/python3 ./tools/mempalace_tools.py daemon-start --debounce-seconds 3 --keep-versions 3
+bash ./tools/mempalace-daemon.sh --debounce-seconds 3 --keep-versions 3
 ```
 
 Windows:
@@ -805,7 +821,6 @@ Windows:
 macOS / Linux:
 
 ```bash
-./mempalace-github-code/.venv/bin/python3 ./tools/mempalace_tools.py daemon-run
 ./mempalace-github-code/.venv/bin/python3 ./tools/mempalace_tools.py daemon-status
 ./mempalace-github-code/.venv/bin/python3 ./tools/mempalace_tools.py daemon-stop
 ./mempalace-github-code/.venv/bin/python3 ./tools/mempalace_tools.py daemon-restart
@@ -830,16 +845,16 @@ Windows:
 git pull
    |
    v
-system python -> mempalace_tools.py setup
+bash ./tools/mempalace-setup.sh
    |
    v
-repo .venv python -> mempalace_tools.py install-agent-mcp
+bash ./tools/mempalace-install-agent-mcp.sh --agent codex
    |
    v
 repo .venv python -> mempalace_tools.py daemon --run-once
-   |
-   v
-repo .venv python -> mempalace_tools.py start-mcp
+    |
+    v
+bash ./tools/mempalace-start-mcp.sh
 ```
 
 对应命令：
@@ -850,10 +865,13 @@ repo .venv python -> mempalace_tools.py start-mcp
 - Windows 启动常驻 daemon：`.\tools\mempalace-daemon.bat`
 - Windows 全量重建：`.\tools\mempalace-rebuild.bat`
 - Windows 其他高级命令：`.\mempalace-github-code\.venv\Scripts\python.exe .\tools\mempalace_tools.py <command>`
-- macOS / Linux `setup`：`python3 ./tools/mempalace_tools.py setup`
-- macOS / Linux 安装本地 Codex MCP：`./mempalace-github-code/.venv/bin/python3 ./tools/mempalace_tools.py install-agent-mcp --agent codex`
-- macOS / Linux 安装本地 Claude Code MCP：`./mempalace-github-code/.venv/bin/python3 ./tools/mempalace_tools.py install-agent-mcp --agent claude-code`
-- macOS / Linux 后续命令：`./mempalace-github-code/.venv/bin/python3 ./tools/mempalace_tools.py <command>`
+- macOS / Linux `setup`：`bash ./tools/mempalace-setup.sh`
+- macOS / Linux 安装本地 Codex MCP：`bash ./tools/mempalace-install-agent-mcp.sh --agent codex`
+- macOS / Linux 安装本地 Claude Code MCP：`bash ./tools/mempalace-install-agent-mcp.sh --agent claude-code`
+- macOS / Linux 启动常驻 daemon：`bash ./tools/mempalace-daemon.sh`
+- macOS / Linux 全量重建：`bash ./tools/mempalace-rebuild.sh`
+- macOS / Linux 启动 MCP：`bash ./tools/mempalace-start-mcp.sh`
+- macOS / Linux 其他高级命令：`./mempalace-github-code/.venv/bin/python3 ./tools/mempalace_tools.py <command>`
 
 ### 11.2 日常写知识
 

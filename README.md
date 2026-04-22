@@ -13,7 +13,86 @@
 
 ---
 
-## 1. 产品定位
+## 0. Windows 用户先看这里
+
+如果你是人在 Windows 上手工执行，这个 README 最重要的就是下面这几条。
+
+绝大多数人平时只需要认这 4 个入口：
+
+```powershell
+第一次安装：
+python .\tools\mempalace_tools.py setup
+.\tools\mempalace-install-agent-mcp.bat --agent codex
+
+平时开 daemon：
+.\tools\mempalace-daemon.bat
+
+需要强制全量重建：
+.\tools\mempalace-rebuild.bat
+
+需要手工停 daemon：
+.\mempalace-github-code\.venv\Scripts\python.exe .\tools\mempalace_tools.py daemon-stop
+```
+
+直接理解成：
+
+- `setup`：新机器第一次安装时执行一次
+- `mempalace-install-agent-mcp.bat`：把本地 agent 接到当前项目
+- `mempalace-daemon.bat`：平时就开这个，持续监听知识目录
+- `mempalace-rebuild.bat`：只有你明确要强制全量重建时才跑
+
+注意：
+
+- 如果你用 Claude Code，把 `--agent codex` 改成 `--agent claude-code`
+- 日常优先用 `.bat`，不要自己手敲长 Python 命令
+- 刚 `rebuild` 完再开 `daemon`，现在不会再无意义地重刷一遍
+
+## 0.1 阅读地图
+
+这份 README 同时写给两类读者：
+
+- 人手工操作时看：`0`、`10`、`11`、`14`
+- AI / 维护者 / 想理解设计时看：`1` 到 `9`、`12` 到 `16`
+
+如果你现在只是想“把这套东西跑起来”，不要从第 `1` 节开始读。
+
+### 0.2 macOS / Linux 人工执行速查
+
+```bash
+首次安装：
+bash ./tools/mempalace-setup.sh
+bash ./tools/mempalace-install-agent-mcp.sh --agent codex
+
+日常全量重建：
+bash ./tools/mempalace-rebuild.sh
+
+日常常驻监听：
+bash ./tools/mempalace-daemon.sh
+
+手工停止 daemon：
+./mempalace-github-code/.venv/bin/python3 ./tools/mempalace_tools.py daemon-stop
+```
+
+注意：
+
+- macOS / Linux 这里用 `bash ./tools/*.sh`
+- 不要用 `sh ./tools/*.sh`
+- `daemon-stop`、`daemon-status`、`daemon-restart` 这类高级控制目前还是直接走 Python CLI
+
+### 0.3 人工执行时怎么选脚本
+
+- `setup`：新机器第一次安装时执行一次
+- `mempalace-install-agent-mcp`：把本地 agent 接到当前项目的 MemPalace
+- `mempalace-rebuild`：立刻做一次全量重建
+- `mempalace-daemon`：前台跑 daemon，持续监听知识目录
+- `daemon-stop`：手工停掉后台或前台 daemon
+- macOS / Linux 对应的是同名 `.sh`，用法统一写成 `bash ./tools/<name>.sh`
+
+---
+
+下面从 `1` 开始，主要是设计和实现说明，偏 AI / 维护者阅读。
+
+## 1. 给 AI / 维护者看的产品定位
 
 这套东西的定位不是“文档仓库”，也不是“直接共享数据库”。
 
@@ -482,6 +561,7 @@ MCP query reads active version
 - 本地生成的 palace 数据目录
 - `current.json` 指向 active version
 - `versions/` 保存历史版本
+- candidate version 构建期间会写 `.build-state.json`
 - `source_snapshot.json` 记录上次构建对应的源文件快照
 - 这是运行产物，不是人工编辑区
 
@@ -490,6 +570,7 @@ MCP query reads active version
 - `daemon.lock`：防止同一工作区启动多个 daemon
 - `daemon.log`：守护进程日志
 - `state.json`：当前快照状态、pending 数量、最近刷新状态
+- `stop-request.json`：优雅停止请求文件，`daemon-stop` 会先写它
 
 ### 9.3 `knowledges-cache/`
 
@@ -528,7 +609,7 @@ mempalace_tools.py
 
 ---
 
-## 10. 常用命令
+## 10. 给人看的常用命令（详细版）
 
 在 `harness-workspace/` 目录下执行。
 
@@ -537,18 +618,34 @@ mempalace_tools.py
 - 首次在新机器 bootstrap 时，用系统 Python 跑一次 `setup`
 - `setup` 成功后，后续命令统一走 `mempalace-github-code/.venv` 里的 Python
 
+如果你是人在手工执行，先记住这一条：
+
+- Windows 优先用 `.bat`
+- macOS / Linux 优先用 `bash ./tools/*.sh`
+- 除非排障，不需要自己拼 `mempalace_tools.py` 参数
+- 顶部 `0` 节是最短路径，这一节是详细版
+
 Windows 推荐优先用这些批处理入口：
 
 - 安装本地 Agent MCP：`.\tools\mempalace-install-agent-mcp.bat`
 - 全量重建：`.\tools\mempalace-rebuild.bat`
 - 常驻 daemon：`.\tools\mempalace-daemon.bat`
 
+最常见的人手工操作可以直接记成：
+
+```text
+第一次安装 -> setup
+接入本地 agent -> mempalace-install-agent-mcp.bat
+强制重建一次 -> mempalace-rebuild.bat
+持续监听刷新 -> mempalace-daemon.bat
+```
+
 ### 10.1 安装和初始化
 
 macOS / Linux:
 
 ```bash
-python3 ./tools/mempalace_tools.py setup
+bash ./tools/mempalace-setup.sh
 ```
 
 Windows:
@@ -578,7 +675,7 @@ python .\tools\mempalace_tools.py setup
 macOS / Linux:
 
 ```bash
-./mempalace-github-code/.venv/bin/python3 ./tools/mempalace_tools.py install-agent-mcp
+bash ./tools/mempalace-install-agent-mcp.sh
 ```
 
 Windows:
@@ -600,7 +697,7 @@ Windows:
 macOS / Linux:
 
 ```bash
-./mempalace-github-code/.venv/bin/python3 ./tools/mempalace_tools.py refresh
+bash ./tools/mempalace-refresh.sh
 ```
 
 Windows:
@@ -619,7 +716,7 @@ Windows:
 macOS / Linux:
 
 ```bash
-./mempalace-github-code/.venv/bin/python3 ./tools/mempalace_tools.py rebuild
+bash ./tools/mempalace-rebuild.sh
 ```
 
 Windows:
@@ -644,7 +741,7 @@ Windows:
 macOS / Linux:
 
 ```bash
-./mempalace-github-code/.venv/bin/python3 ./tools/mempalace_tools.py start-mcp
+bash ./tools/mempalace-start-mcp.sh
 ```
 
 Windows:
@@ -663,7 +760,7 @@ Windows:
 macOS / Linux:
 
 ```bash
-./mempalace-github-code/.venv/bin/python3 ./tools/mempalace_tools.py daemon-start
+bash ./tools/mempalace-daemon.sh
 ```
 
 Windows:
@@ -678,6 +775,8 @@ Windows:
 - `mempalace-daemon.bat` / `mempalace-daemon.sh` 现在默认执行 `daemon-run`
 - 前台模式下，你会一直看到日志；按 `Ctrl+C` 就会关闭 daemon
 - `daemon-start` 会把 daemon 脱离当前终端，后台常驻
+- 如果 active palace 的 `source_snapshot` 已经和当前知识源一致，daemon 启动时不会再额外跑一轮 refresh；刚执行完 `rebuild` 再起 daemon，会直接进入监听态
+- `daemon-stop` 默认先请求优雅停止，等当前 refresh 收尾；超时后才会 force kill
 - 关闭当前 Codex / Claude Code / 终端后，后台 daemon 仍然继续轮询
 - 如果你就是想看前台实时输出，才直接用 `daemon`
 - `daemon-restart` 默认先等当前 refresh 空闲，再重启；只有传 `--force` 才会中断正在进行的 refresh
@@ -688,7 +787,7 @@ Windows:
 macOS / Linux:
 
 ```bash
-./mempalace-github-code/.venv/bin/python3 ./tools/mempalace_tools.py daemon-start --debounce-seconds 3 --keep-versions 3
+bash ./tools/mempalace-daemon.sh --debounce-seconds 3 --keep-versions 3
 ```
 
 Windows:
@@ -722,7 +821,6 @@ Windows:
 macOS / Linux:
 
 ```bash
-./mempalace-github-code/.venv/bin/python3 ./tools/mempalace_tools.py daemon-run
 ./mempalace-github-code/.venv/bin/python3 ./tools/mempalace_tools.py daemon-status
 ./mempalace-github-code/.venv/bin/python3 ./tools/mempalace_tools.py daemon-stop
 ./mempalace-github-code/.venv/bin/python3 ./tools/mempalace_tools.py daemon-restart
@@ -739,7 +837,7 @@ Windows:
 
 ---
 
-## 11. 推荐使用方式
+## 11. 给人看的推荐使用方式
 
 ### 11.1 新机器首次接入
 
@@ -747,16 +845,16 @@ Windows:
 git pull
    |
    v
-system python -> mempalace_tools.py setup
+bash ./tools/mempalace-setup.sh
    |
    v
-repo .venv python -> mempalace_tools.py install-agent-mcp
+bash ./tools/mempalace-install-agent-mcp.sh --agent codex
    |
    v
 repo .venv python -> mempalace_tools.py daemon --run-once
-   |
-   v
-repo .venv python -> mempalace_tools.py start-mcp
+    |
+    v
+bash ./tools/mempalace-start-mcp.sh
 ```
 
 对应命令：
@@ -767,10 +865,13 @@ repo .venv python -> mempalace_tools.py start-mcp
 - Windows 启动常驻 daemon：`.\tools\mempalace-daemon.bat`
 - Windows 全量重建：`.\tools\mempalace-rebuild.bat`
 - Windows 其他高级命令：`.\mempalace-github-code\.venv\Scripts\python.exe .\tools\mempalace_tools.py <command>`
-- macOS / Linux `setup`：`python3 ./tools/mempalace_tools.py setup`
-- macOS / Linux 安装本地 Codex MCP：`./mempalace-github-code/.venv/bin/python3 ./tools/mempalace_tools.py install-agent-mcp --agent codex`
-- macOS / Linux 安装本地 Claude Code MCP：`./mempalace-github-code/.venv/bin/python3 ./tools/mempalace_tools.py install-agent-mcp --agent claude-code`
-- macOS / Linux 后续命令：`./mempalace-github-code/.venv/bin/python3 ./tools/mempalace_tools.py <command>`
+- macOS / Linux `setup`：`bash ./tools/mempalace-setup.sh`
+- macOS / Linux 安装本地 Codex MCP：`bash ./tools/mempalace-install-agent-mcp.sh --agent codex`
+- macOS / Linux 安装本地 Claude Code MCP：`bash ./tools/mempalace-install-agent-mcp.sh --agent claude-code`
+- macOS / Linux 启动常驻 daemon：`bash ./tools/mempalace-daemon.sh`
+- macOS / Linux 全量重建：`bash ./tools/mempalace-rebuild.sh`
+- macOS / Linux 启动 MCP：`bash ./tools/mempalace-start-mcp.sh`
+- macOS / Linux 其他高级命令：`./mempalace-github-code/.venv/bin/python3 ./tools/mempalace_tools.py <command>`
 
 ### 11.2 日常写知识
 
@@ -851,6 +952,13 @@ query through MCP
 - 索引中间态可能暴露
 - 出错时难回退
 
+现在是 blue-green：
+
+- 新版本先在 `versions/<timestamp>/` 里单独构建
+- 只有构建成功才切 `current.json`
+- 如果中途异常或被强杀，active palace 仍然保持旧版本
+- 未完成 candidate 会带 `.build-state.json`，下次 `refresh` / `rebuild` / `daemon` 启动时会自动清理
+
 ### 13.3 为什么只监听当前文件夹
 
 因为产品边界需要稳定。
@@ -866,7 +974,7 @@ query through MCP
 
 ---
 
-## 14. 故障排查
+## 14. 给人看的故障排查
 
 ### 14.1 `refresh` 没反应
 
@@ -896,6 +1004,7 @@ No knowledge changes detected. Keeping current active palace.
 - `mempalace.yaml` 改了，导致整 wing reset
 - `seed copy` 失败，回退成 full refresh
 - 本次真的有大 wing 发生改动
+- 如果报 `UnicodeEncodeError: 'charmap' codec can't encode characters`，通常是 Windows 非 UTF-8 终端在打印装饰分隔线。更新到最新 `tools/mempalace_tools.py` 后，子进程会强制 UTF-8；终端里分隔线可能显示成 `?`，但不会中断 `refresh` / `rebuild`
 
 ### 14.4 daemon 启动失败
 
@@ -903,6 +1012,7 @@ No knowledge changes detected. Keeping current active palace.
 
 - 有没有旧 daemon 还活着
 - `.mempalace_local/refresh-daemon/daemon.lock` 是否残留
+- `.mempalace_local/refresh-daemon/stop-request.json` 是否被异常残留
 - `state.json` 里的 pid 是否还存在
 
 ### 14.5 MCP 启动失败
