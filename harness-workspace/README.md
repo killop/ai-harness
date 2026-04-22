@@ -482,6 +482,7 @@ MCP query reads active version
 - 本地生成的 palace 数据目录
 - `current.json` 指向 active version
 - `versions/` 保存历史版本
+- candidate version 构建期间会写 `.build-state.json`
 - `source_snapshot.json` 记录上次构建对应的源文件快照
 - 这是运行产物，不是人工编辑区
 
@@ -490,6 +491,7 @@ MCP query reads active version
 - `daemon.lock`：防止同一工作区启动多个 daemon
 - `daemon.log`：守护进程日志
 - `state.json`：当前快照状态、pending 数量、最近刷新状态
+- `stop-request.json`：优雅停止请求文件，`daemon-stop` 会先写它
 
 ### 9.3 `knowledges-cache/`
 
@@ -678,6 +680,8 @@ Windows:
 - `mempalace-daemon.bat` / `mempalace-daemon.sh` 现在默认执行 `daemon-run`
 - 前台模式下，你会一直看到日志；按 `Ctrl+C` 就会关闭 daemon
 - `daemon-start` 会把 daemon 脱离当前终端，后台常驻
+- 如果 active palace 的 `source_snapshot` 已经和当前知识源一致，daemon 启动时不会再额外跑一轮 refresh；刚执行完 `rebuild` 再起 daemon，会直接进入监听态
+- `daemon-stop` 默认先请求优雅停止，等当前 refresh 收尾；超时后才会 force kill
 - 关闭当前 Codex / Claude Code / 终端后，后台 daemon 仍然继续轮询
 - 如果你就是想看前台实时输出，才直接用 `daemon`
 - `daemon-restart` 默认先等当前 refresh 空闲，再重启；只有传 `--force` 才会中断正在进行的 refresh
@@ -851,6 +855,13 @@ query through MCP
 - 索引中间态可能暴露
 - 出错时难回退
 
+现在是 blue-green：
+
+- 新版本先在 `versions/<timestamp>/` 里单独构建
+- 只有构建成功才切 `current.json`
+- 如果中途异常或被强杀，active palace 仍然保持旧版本
+- 未完成 candidate 会带 `.build-state.json`，下次 `refresh` / `rebuild` / `daemon` 启动时会自动清理
+
 ### 13.3 为什么只监听当前文件夹
 
 因为产品边界需要稳定。
@@ -896,6 +907,7 @@ No knowledge changes detected. Keeping current active palace.
 - `mempalace.yaml` 改了，导致整 wing reset
 - `seed copy` 失败，回退成 full refresh
 - 本次真的有大 wing 发生改动
+- 如果报 `UnicodeEncodeError: 'charmap' codec can't encode characters`，通常是 Windows 非 UTF-8 终端在打印装饰分隔线。更新到最新 `tools/mempalace_tools.py` 后，子进程会强制 UTF-8；终端里分隔线可能显示成 `?`，但不会中断 `refresh` / `rebuild`
 
 ### 14.4 daemon 启动失败
 
@@ -903,6 +915,7 @@ No knowledge changes detected. Keeping current active palace.
 
 - 有没有旧 daemon 还活着
 - `.mempalace_local/refresh-daemon/daemon.lock` 是否残留
+- `.mempalace_local/refresh-daemon/stop-request.json` 是否被异常残留
 - `state.json` 里的 pid 是否还存在
 
 ### 14.5 MCP 启动失败

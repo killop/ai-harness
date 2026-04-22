@@ -35,12 +35,12 @@ class Change:
 class StdoutLogger:
     def log(self, message: str, level: str = "INFO") -> None:
         if not message:
-            print("")
+            emit_console_line("")
             return
         if level in {"INFO", "STDOUT"}:
-            print(message)
+            emit_console_line(message)
             return
-        print(f"[{level}] {message}")
+        emit_console_line(f"[{level}] {message}")
 
 
 class DaemonLogger:
@@ -56,10 +56,32 @@ class DaemonLogger:
             handle.write(line + "\n")
         if not self.stdout_available:
             return
-        try:
-            print(line, flush=True)
-        except (BrokenPipeError, OSError, ValueError):
+        if not emit_console_line(line, flush=True):
             self.stdout_available = False
+
+
+def emit_console_line(message: str, *, flush: bool = False) -> bool:
+    try:
+        print(message, flush=flush)
+        return True
+    except UnicodeEncodeError:
+        stream = sys.stdout
+        encoding = getattr(stream, "encoding", None) or "utf-8"
+        sanitized = message.encode(encoding, errors="replace").decode(encoding, errors="replace")
+        try:
+            print(sanitized, flush=flush)
+            return True
+        except (BrokenPipeError, OSError, ValueError):
+            return False
+    except (BrokenPipeError, OSError, ValueError):
+        return False
+
+
+def build_python_subprocess_env() -> dict[str, str]:
+    env = os.environ.copy()
+    env["PYTHONIOENCODING"] = "utf-8"
+    env["PYTHONUTF8"] = "1"
+    return env
 
 
 class LockFile:
@@ -139,6 +161,8 @@ CURRENT_POINTER_FILENAME = "current.json"
 VERSIONS_DIRECTORY_NAME = "versions"
 PALACE_DB_FILENAME = "chroma.sqlite3"
 PALACE_SNAPSHOT_FILENAME = "source_snapshot.json"
+PALACE_BUILD_MARKER_FILENAME = ".build-state.json"
+DAEMON_STOP_REQUEST_FILENAME = "stop-request.json"
 
 
 def path_within(parent: Path, child: Path) -> bool:
@@ -175,6 +199,10 @@ def palace_snapshot_path(palace_path: Path) -> Path:
     return palace_path / PALACE_SNAPSHOT_FILENAME
 
 
+def palace_build_marker_path(palace_path: Path) -> Path:
+    return palace_path / PALACE_BUILD_MARKER_FILENAME
+
+
 def daemon_lock_path(daemon_root: Path) -> Path:
     return daemon_root / "daemon.lock"
 
@@ -185,6 +213,10 @@ def daemon_state_path(daemon_root: Path) -> Path:
 
 def daemon_log_path(daemon_root: Path) -> Path:
     return daemon_root / "daemon.log"
+
+
+def daemon_stop_request_path(daemon_root: Path) -> Path:
+    return daemon_root / DAEMON_STOP_REQUEST_FILENAME
 
 
 def has_palace_database(path: Path) -> bool:
@@ -299,6 +331,58 @@ def create_versioned_palace_dir(palace_root: Path) -> Path:
             return version_path
         except FileExistsError:
             continue
+
+
+def write_version_build_marker(version_path: Path) -> None:
+    resolved_version = version_path.expanduser().resolve()
+    payload = {
+        "status": "building",
+        "pid": os.getpid(),
+        "started_at": iso_utc(time.time()),
+        "version_path": str(resolved_version),
+    }
+    write_json_atomic(palace_build_marker_path(resolved_version), payload)
+
+
+def remove_version_build_marker(version_path: Path) -> None:
+    palace_build_marker_path(version_path.expanduser().resolve()).unlink(missing_ok=True)
+
+
+def cleanup_incomplete_versions(palace_root: Path, active_path: Path | None, logger) -> list[Path]:
+    resolved_root = palace_root.expanduser().resolve()
+    active_resolved = active_path.expanduser().resolve() if active_path is not None else None
+    removed_versions: list[Path] = []
+
+    for version_path in iter_versioned_palaces(resolved_root):
+        resolved_version = version_path.resolve()
+        marker_path = palace_build_marker_path(resolved_version)
+        if not marker_path.is_file():
+            continue
+
+        if active_resolved is not None and resolved_version == active_resolved:
+            remove_version_build_marker(resolved_version)
+            logger.log(f"Cleared stale build marker from active palace version: {resolved_version}")
+            continue
+
+        try:
+            marker_payload = load_json_file(marker_path)
+        except RuntimeError as exc:
+            logger.log(f"Invalid build marker at {marker_path}: {exc}", "WARN")
+            marker_payload = None
+
+        pid = daemon_pid_from_payload(marker_payload)
+        if pid > 0 and pid_exists(pid):
+            logger.log(
+                f"Keeping incomplete palace version owned by live PID {pid}: {resolved_version}",
+                "WARN",
+            )
+            continue
+
+        remove_tree_if_exists(resolved_version, resolved_root, "stale incomplete palace version")
+        removed_versions.append(resolved_version)
+        logger.log(f"Removed stale incomplete palace version: {resolved_version}")
+
+    return removed_versions
 
 
 def load_source_snapshot(palace_path: Path) -> Dict[str, FileStamp] | None:
@@ -439,6 +523,23 @@ def read_daemon_state(daemon_root: Path) -> dict | None:
     return load_json_file(daemon_state_path(daemon_root))
 
 
+def read_daemon_stop_request(daemon_root: Path) -> dict | None:
+    return load_json_file(daemon_stop_request_path(daemon_root))
+
+
+def write_daemon_stop_request(daemon_root: Path, pid: int) -> None:
+    payload = {
+        "pid": pid,
+        "requested_at": iso_utc(time.time()),
+        "requested_by_pid": os.getpid(),
+    }
+    write_json_atomic(daemon_stop_request_path(daemon_root), payload)
+
+
+def clear_daemon_stop_request(daemon_root: Path) -> None:
+    daemon_stop_request_path(daemon_root).unlink(missing_ok=True)
+
+
 def daemon_pid_from_payload(payload: dict | None) -> int:
     if not isinstance(payload, dict):
         return 0
@@ -481,6 +582,7 @@ def start_background_process(command: Sequence[str], cwd: Path) -> subprocess.Po
         "stdout": subprocess.DEVNULL,
         "stderr": subprocess.DEVNULL,
         "close_fds": True,
+        "env": build_python_subprocess_env(),
     }
     if os.name == "nt":
         kwargs["creationflags"] = 0x00000008 | 0x00000200 | 0x08000000
@@ -503,7 +605,18 @@ def stop_process_tree(pid: int) -> None:
             raise RuntimeError(f"Failed to stop daemon process {pid}: {detail}")
         return
 
-    os.kill(pid, signal.SIGTERM)
+    try:
+        os.killpg(pid, signal.SIGKILL)
+        return
+    except ProcessLookupError:
+        return
+    except Exception:
+        pass
+
+    try:
+        os.kill(pid, signal.SIGKILL)
+    except ProcessLookupError:
+        return
 
 
 def pid_exists(pid: int) -> bool:
@@ -577,6 +690,7 @@ def query_python_version(python_exe: str) -> tuple[int, int]:
         text=True,
         encoding="utf-8",
         errors="replace",
+        env=build_python_subprocess_env(),
     )
     if result.returncode != 0:
         raise RuntimeError(f"Could not query Python version from {python_exe}")
@@ -813,7 +927,11 @@ def load_claude_project_server(project_root: Path, server_name: str) -> dict | N
 
 
 def run_command(command: Sequence[str], *, cwd: Path | None = None) -> None:
-    result = subprocess.run(command, cwd=str(cwd) if cwd else None)
+    result = subprocess.run(
+        command,
+        cwd=str(cwd) if cwd else None,
+        env=build_python_subprocess_env(),
+    )
     if result.returncode != 0:
         raise RuntimeError(f"Command failed ({result.returncode}): {' '.join(command)}")
 
@@ -886,6 +1004,7 @@ def stream_command_output(command: Sequence[str], *, cwd: Path, logger, level: s
         encoding="utf-8",
         errors="replace",
         bufsize=1,
+        env=build_python_subprocess_env(),
     )
 
     assert process.stdout is not None
@@ -975,11 +1094,41 @@ def prepare_refresh_context(args: argparse.Namespace) -> dict[str, Path]:
     return paths
 
 
+def plan_startup_refresh_changes(
+    active_palace: Path | None,
+    current_snapshot: Dict[str, FileStamp],
+    logger,
+) -> list[Change]:
+    if active_palace is None:
+        logger.log("No active palace found. Scheduling initial startup refresh.")
+        return [Change(path="<startup>", kind="initial-refresh")]
+
+    previous_snapshot = load_source_snapshot(active_palace)
+    if previous_snapshot is None:
+        logger.log(
+            f"Active palace is missing source snapshot. Scheduling baseline startup refresh: {active_palace}",
+            "WARN",
+        )
+        return [Change(path="<startup>", kind="full-refresh")]
+
+    startup_changes = diff_snapshots(previous_snapshot, current_snapshot)
+    if startup_changes:
+        logger.log(
+            "Detected source changes while daemon was offline. "
+            + change_summary(startup_changes)
+        )
+        return startup_changes
+
+    logger.log("Active palace already matches knowledge cache. Skipping startup refresh.")
+    return []
+
+
 def run_refresh_core(args: argparse.Namespace, logger) -> None:
     paths = prepare_refresh_context(args)
     ensure_unmanaged_palace_path(paths["palace_path"])
     paths["palace_path"].mkdir(parents=True, exist_ok=True)
     refresh_palace(paths["palace_path"], paths["mempalace_repo"], paths["knowledge_cache_root"], logger)
+    write_source_snapshot(paths["palace_path"], build_snapshot(paths["knowledge_cache_root"]))
 
 
 def purge_deleted_sources(
@@ -1085,6 +1234,7 @@ def run_blue_green_refresh_core(
     palace_root = paths["palace_path"]
     palace_root.mkdir(parents=True, exist_ok=True)
     active_before = bootstrap_current_pointer_if_needed(palace_root, logger)
+    cleanup_incomplete_versions(palace_root, active_before, logger)
     current_snapshot = build_snapshot(paths["knowledge_cache_root"])
 
     previous_snapshot = load_source_snapshot(active_before) if active_before is not None else None
@@ -1119,6 +1269,7 @@ def run_blue_green_refresh_core(
     )
     can_seed_from_active = active_before is not None and has_palace_database(active_before)
     version_path = create_versioned_palace_dir(palace_root)
+    write_version_build_marker(version_path)
 
     try:
         seeded_from_active = False
@@ -1164,10 +1315,11 @@ def run_blue_green_refresh_core(
             refresh_palace(version_path, paths["mempalace_repo"], paths["knowledge_cache_root"], logger)
         write_source_snapshot(version_path, current_snapshot)
     except Exception:
-        shutil.rmtree(version_path, ignore_errors=True)
+        remove_tree_if_exists(version_path, palace_root, "failed palace version")
         raise
 
     write_current_pointer(palace_root, version_path, version_path.name)
+    remove_version_build_marker(version_path)
     logger.log(f"Activated palace version: {version_path}")
     if active_before is not None and active_before != version_path:
         logger.log(f"Previous active palace: {active_before}")
@@ -1256,6 +1408,7 @@ def write_state(
 def format_daemon_summary(daemon_root: Path) -> list[str]:
     lock_payload = read_daemon_lock(daemon_root)
     state_payload = read_daemon_state(daemon_root)
+    stop_payload = read_daemon_stop_request(daemon_root)
     pid = daemon_pid_from_payload(lock_payload or state_payload)
     is_running = pid_exists(pid)
 
@@ -1264,6 +1417,7 @@ def format_daemon_summary(daemon_root: Path) -> list[str]:
         f"Lock file: {daemon_lock_path(daemon_root)}",
         f"State file: {daemon_state_path(daemon_root)}",
         f"Log file: {daemon_log_path(daemon_root)}",
+        f"Stop request: {'yes' if isinstance(stop_payload, dict) else 'no'}",
         f"Running: {'yes' if is_running else 'no'}",
         f"PID: {pid if pid > 0 else 'unknown'}",
     ]
@@ -1275,6 +1429,8 @@ def format_daemon_summary(daemon_root: Path) -> list[str]:
         lines.append(f"Tracked files: {state_payload.get('tracked_files', 0)}")
         if state_payload.get("last_error"):
             lines.append(f"Last error: {state_payload['last_error']}")
+    if isinstance(stop_payload, dict):
+        lines.append(f"Stop requested at: {stop_payload.get('requested_at') or 'unknown'}")
 
     return lines
 
@@ -1297,6 +1453,15 @@ def wait_for_daemon_idle(daemon_root: Path, timeout_seconds: float) -> bool:
             return True
         time.sleep(0.2)
     return not daemon_refresh_running(daemon_root)
+
+
+def wait_for_process_exit(pid: int, timeout_seconds: float) -> bool:
+    deadline = time.time() + max(timeout_seconds, 0.0)
+    while time.time() < deadline:
+        if not pid_exists(pid):
+            return True
+        time.sleep(0.2)
+    return not pid_exists(pid)
 
 
 def install_signal_handlers(lock_file: LockFile, logger: DaemonLogger) -> None:
@@ -1389,17 +1554,20 @@ def run_blue_green_rebuild_core(args: argparse.Namespace, logger) -> Path:
     palace_root = paths["palace_path"]
     palace_root.mkdir(parents=True, exist_ok=True)
     active_before = bootstrap_current_pointer_if_needed(palace_root, logger)
+    cleanup_incomplete_versions(palace_root, active_before, logger)
     version_path = create_versioned_palace_dir(palace_root)
+    write_version_build_marker(version_path)
 
     try:
         logger.log("Starting full rebuild for managed palace root without seed copy.")
         refresh_palace(version_path, paths["mempalace_repo"], paths["knowledge_cache_root"], logger)
         write_source_snapshot(version_path, build_snapshot(paths["knowledge_cache_root"]))
     except Exception:
-        shutil.rmtree(version_path, ignore_errors=True)
+        remove_tree_if_exists(version_path, palace_root, "failed palace version")
         raise
 
     write_current_pointer(palace_root, version_path, version_path.name)
+    remove_version_build_marker(version_path)
     logger.log(f"Activated rebuilt palace version: {version_path}")
     if active_before is not None and active_before != version_path:
         logger.log(f"Previous active palace: {active_before}")
@@ -1453,6 +1621,7 @@ def run_start_mcp(args: argparse.Namespace) -> int:
     result = subprocess.run(
         [str(python_exe), "-m", "mempalace.mcp_server", "--palace", str(palace_path)],
         cwd=str(mempalace_repo),
+        env=build_python_subprocess_env(),
     )
     return result.returncode
 
@@ -1586,8 +1755,12 @@ def run_daemon(args: argparse.Namespace) -> int:
     )
     lock_file.acquire()
     install_signal_handlers(lock_file, logger)
+    clear_daemon_stop_request(daemon_root)
+    paths["palace_path"].mkdir(parents=True, exist_ok=True)
 
     logger.log(f"MemPalace refresh daemon starting. Palace root: {paths['palace_path']}")
+    active_palace = bootstrap_current_pointer_if_needed(paths["palace_path"], logger)
+    cleanup_incomplete_versions(paths["palace_path"], active_palace, logger)
 
     snapshot = build_snapshot(paths["knowledge_cache_root"])
     pending_changes: Dict[str, Change] = {}
@@ -1598,9 +1771,12 @@ def run_daemon(args: argparse.Namespace) -> int:
     last_error: str | None = None
 
     if not args.no_initial_refresh:
-        pending_changes["<startup>"] = Change(path="<startup>", kind="initial-refresh")
-        last_change_at_wall = time.time()
-        last_change_at_monotonic = time.monotonic()
+        startup_changes = plan_startup_refresh_changes(active_palace, snapshot, logger)
+        if startup_changes:
+            for change in startup_changes:
+                pending_changes[change.path] = change
+            last_change_at_wall = time.time()
+            last_change_at_monotonic = time.monotonic()
 
     write_state(
         daemon_state_path(daemon_root),
@@ -1613,36 +1789,114 @@ def run_daemon(args: argparse.Namespace) -> int:
         last_error,
     )
 
-    if args.run_once:
-        logger.log(f"Refresh started. Changes: {change_summary(pending_changes.values())}")
-        version_path = run_blue_green_refresh_core(args, logger, list(pending_changes.values()))
-        snapshot = build_snapshot(paths["knowledge_cache_root"])
-        logger.log(f"Blue-green cutover complete. Active palace: {version_path}")
-        write_state(
-            daemon_state_path(daemon_root),
-            args,
-            snapshot,
-            {},
-            last_change_at_wall,
-            time.time(),
-            "ok",
-            None,
-        )
-        return 0
+    try:
+        if args.run_once:
+            if not pending_changes:
+                logger.log("No startup refresh required. Exiting without rebuild.")
+                write_state(
+                    daemon_state_path(daemon_root),
+                    args,
+                    snapshot,
+                    {},
+                    last_change_at_wall,
+                    last_refresh_at,
+                    last_refresh_status,
+                    last_error,
+                )
+                return 0
+            logger.log(f"Refresh started. Changes: {change_summary(pending_changes.values())}")
+            version_path = run_blue_green_refresh_core(args, logger, list(pending_changes.values()))
+            snapshot = build_snapshot(paths["knowledge_cache_root"])
+            logger.log(f"Blue-green cutover complete. Active palace: {version_path}")
+            write_state(
+                daemon_state_path(daemon_root),
+                args,
+                snapshot,
+                {},
+                last_change_at_wall,
+                time.time(),
+                "ok",
+                None,
+            )
+            return 0
 
-    logger.log(f"Daemon ready. Poll={args.poll_seconds}s, debounce={args.debounce_seconds}s")
+        logger.log(f"Daemon ready. Poll={args.poll_seconds}s, debounce={args.debounce_seconds}s")
 
-    while True:
-        time.sleep(args.poll_seconds)
-        current_snapshot = build_snapshot(paths["knowledge_cache_root"])
-        detected_changes = diff_snapshots(snapshot, current_snapshot)
-        if detected_changes:
-            snapshot = current_snapshot
-            for change in detected_changes:
-                pending_changes[change.path] = change
-            last_change_at_wall = time.time()
-            last_change_at_monotonic = time.monotonic()
-            logger.log(f"Detected changes: {change_summary(detected_changes)}")
+        while True:
+            if read_daemon_stop_request(daemon_root) is not None:
+                logger.log("Graceful stop requested. Shutting down daemon.")
+                write_state(
+                    daemon_state_path(daemon_root),
+                    args,
+                    snapshot,
+                    pending_changes,
+                    last_change_at_wall,
+                    last_refresh_at,
+                    last_refresh_status,
+                    last_error,
+                )
+                return 0
+
+            time.sleep(args.poll_seconds)
+            if read_daemon_stop_request(daemon_root) is not None:
+                logger.log("Graceful stop requested. Shutting down daemon.")
+                write_state(
+                    daemon_state_path(daemon_root),
+                    args,
+                    snapshot,
+                    pending_changes,
+                    last_change_at_wall,
+                    last_refresh_at,
+                    last_refresh_status,
+                    last_error,
+                )
+                return 0
+
+            current_snapshot = build_snapshot(paths["knowledge_cache_root"])
+            detected_changes = diff_snapshots(snapshot, current_snapshot)
+            if detected_changes:
+                snapshot = current_snapshot
+                for change in detected_changes:
+                    pending_changes[change.path] = change
+                last_change_at_wall = time.time()
+                last_change_at_monotonic = time.monotonic()
+                logger.log(f"Detected changes: {change_summary(detected_changes)}")
+                write_state(
+                    daemon_state_path(daemon_root),
+                    args,
+                    snapshot,
+                    pending_changes,
+                    last_change_at_wall,
+                    last_refresh_at,
+                    last_refresh_status,
+                    last_error,
+                )
+
+            if not pending_changes or last_change_at_monotonic is None:
+                continue
+
+            if read_daemon_stop_request(daemon_root) is not None:
+                logger.log("Graceful stop requested. Pending changes will be picked up on next start.")
+                write_state(
+                    daemon_state_path(daemon_root),
+                    args,
+                    snapshot,
+                    pending_changes,
+                    last_change_at_wall,
+                    last_refresh_at,
+                    last_refresh_status,
+                    last_error,
+                )
+                return 0
+
+            if time.monotonic() - last_change_at_monotonic < args.debounce_seconds:
+                continue
+
+            changes_for_run = list(pending_changes.values())
+            pending_changes.clear()
+            refresh_base_snapshot = snapshot
+            last_refresh_status = "running"
+            last_error = None
             write_state(
                 daemon_state_path(daemon_root),
                 args,
@@ -1654,61 +1908,48 @@ def run_daemon(args: argparse.Namespace) -> int:
                 last_error,
             )
 
-        if not pending_changes or last_change_at_monotonic is None:
-            continue
+            try:
+                logger.log(f"Refresh started. Changes: {change_summary(changes_for_run)}")
+                version_path = run_blue_green_refresh_core(args, logger, changes_for_run)
+                last_refresh_status = "ok"
+                logger.log(f"Blue-green cutover complete. Active palace: {version_path}")
+            except Exception as exc:
+                last_refresh_status = "failed"
+                last_error = str(exc)
+                logger.log(f"Refresh failed: {exc}", "ERROR")
 
-        if time.monotonic() - last_change_at_monotonic < args.debounce_seconds:
-            continue
+            last_refresh_at = time.time()
+            snapshot = build_snapshot(paths["knowledge_cache_root"])
+            follow_up_changes = diff_snapshots(refresh_base_snapshot, snapshot)
+            if follow_up_changes:
+                for change in follow_up_changes:
+                    pending_changes[change.path] = change
+                last_change_at_wall = time.time()
+                last_change_at_monotonic = time.monotonic()
+                logger.log(
+                    "Detected new changes while refresh was running: "
+                    + change_summary(follow_up_changes)
+                )
 
-        changes_for_run = list(pending_changes.values())
-        pending_changes.clear()
-        refresh_base_snapshot = snapshot
-        last_refresh_status = "running"
-        last_error = None
-        write_state(
-            daemon_state_path(daemon_root),
-            args,
-            snapshot,
-            pending_changes,
-            last_change_at_wall,
-            last_refresh_at,
-            last_refresh_status,
-            last_error,
-        )
-
-        try:
-            logger.log(f"Refresh started. Changes: {change_summary(changes_for_run)}")
-            version_path = run_blue_green_refresh_core(args, logger, changes_for_run)
-            last_refresh_status = "ok"
-            logger.log(f"Blue-green cutover complete. Active palace: {version_path}")
-        except Exception as exc:
-            last_refresh_status = "failed"
-            last_error = str(exc)
-            logger.log(f"Refresh failed: {exc}", "ERROR")
-
-        last_refresh_at = time.time()
-        snapshot = build_snapshot(paths["knowledge_cache_root"])
-        follow_up_changes = diff_snapshots(refresh_base_snapshot, snapshot)
-        if follow_up_changes:
-            for change in follow_up_changes:
-                pending_changes[change.path] = change
-            last_change_at_wall = time.time()
-            last_change_at_monotonic = time.monotonic()
-            logger.log(
-                "Detected new changes while refresh was running: "
-                + change_summary(follow_up_changes)
+            write_state(
+                daemon_state_path(daemon_root),
+                args,
+                snapshot,
+                pending_changes,
+                last_change_at_wall,
+                last_refresh_at,
+                last_refresh_status,
+                last_error,
             )
 
-        write_state(
-            daemon_state_path(daemon_root),
-            args,
-            snapshot,
-            pending_changes,
-            last_change_at_wall,
-            last_refresh_at,
-            last_refresh_status,
-            last_error,
-        )
+            if read_daemon_stop_request(daemon_root) is not None:
+                logger.log(
+                    "Graceful stop requested while refresh was running. "
+                    "Current refresh is complete; stopping daemon now."
+                )
+                return 0
+    finally:
+        clear_daemon_stop_request(daemon_root)
 
 
 def run_daemon_start(args: argparse.Namespace) -> int:
@@ -1755,29 +1996,38 @@ def run_daemon_stop(args: argparse.Namespace) -> int:
     workspace_root = Path(args.workspace_root).expanduser().resolve()
     ensure_required_path(workspace_root, "Workspace root")
     daemon_root = daemon_root_from_workspace(workspace_root)
+    graceful_timeout = max(float(getattr(args, "graceful_timeout_seconds", 15.0)), 0.0)
+    force_stop = bool(getattr(args, "force", False))
 
     lock_payload = read_daemon_lock(daemon_root)
     pid = daemon_pid_from_payload(lock_payload)
     if pid <= 0:
+        clear_daemon_stop_request(daemon_root)
         print(f"No running daemon found for workspace: {workspace_root}")
         return 0
 
     if not pid_exists(pid):
         daemon_lock_path(daemon_root).unlink(missing_ok=True)
+        clear_daemon_stop_request(daemon_root)
         print(f"Removed stale daemon lock for workspace: {workspace_root}")
         return 0
 
-    stop_process_tree(pid)
-    deadline = time.time() + 5.0
-    while time.time() < deadline:
-        if not pid_exists(pid):
-            break
-        time.sleep(0.2)
+    if not force_stop and graceful_timeout > 0:
+        write_daemon_stop_request(daemon_root, pid)
+        print(f"Requested graceful daemon stop for workspace: {workspace_root}")
+        if wait_for_process_exit(pid, graceful_timeout):
+            daemon_lock_path(daemon_root).unlink(missing_ok=True)
+            clear_daemon_stop_request(daemon_root)
+            print(f"Stopped MemPalace daemon for workspace: {workspace_root}")
+            return 0
+        print(f"Graceful stop timed out after {graceful_timeout:.1f}s. Forcing daemon stop.")
 
-    if pid_exists(pid):
+    stop_process_tree(pid)
+    if not wait_for_process_exit(pid, 5.0):
         raise RuntimeError(f"Daemon process {pid} is still running after stop request.")
 
     daemon_lock_path(daemon_root).unlink(missing_ok=True)
+    clear_daemon_stop_request(daemon_root)
     print(f"Stopped MemPalace daemon for workspace: {workspace_root}")
     return 0
 
@@ -1803,6 +2053,7 @@ def prepare_daemon_restart(args: argparse.Namespace) -> dict[str, Path]:
 
     lock_payload = read_daemon_lock(daemon_root)
     existing_pid = daemon_pid_from_payload(lock_payload)
+    force_stop = False
     if existing_pid > 0 and pid_exists(existing_pid):
         if daemon_refresh_running(daemon_root):
             if not wait_for_daemon_idle(daemon_root, args.wait_for_idle_seconds):
@@ -1815,8 +2066,13 @@ def prepare_daemon_restart(args: argparse.Namespace) -> dict[str, Path]:
                     "Warning: forcing daemon restart while a refresh is still running. "
                     "The active palace stays safe, but the in-flight candidate build will be discarded."
                 )
+                force_stop = True
 
-        stop_args = argparse.Namespace(workspace_root=str(paths["workspace_root"]))
+        stop_args = argparse.Namespace(
+            workspace_root=str(paths["workspace_root"]),
+            graceful_timeout_seconds=getattr(args, "graceful_timeout_seconds", 15.0),
+            force=force_stop,
+        )
         run_daemon_stop(stop_args)
 
     return paths
@@ -1934,6 +2190,8 @@ def build_parser() -> argparse.ArgumentParser:
         help="Stop the background MemPalace refresh daemon for this workspace.",
     )
     daemon_stop_parser.add_argument("--workspace-root", default=str(default_workspace_root()))
+    daemon_stop_parser.add_argument("--graceful-timeout-seconds", type=float, default=15.0)
+    daemon_stop_parser.add_argument("--force", action="store_true")
     daemon_stop_parser.set_defaults(func=run_daemon_stop)
 
     daemon_status_parser = subparsers.add_parser(
